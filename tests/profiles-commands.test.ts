@@ -113,7 +113,7 @@ describe("profiles commands", () => {
     expect(profileSyncer.removeNativeProfile).toHaveBeenCalledWith("kimi-dev");
   });
 
-  it("removeProfileAction removes the active symlink", () => {
+  it("removeProfileAction removes the active config.toml copy", () => {
     ensureProfilesFile();
     const initial: ProfilesData = {
       profiles: {
@@ -129,8 +129,8 @@ describe("profiles commands", () => {
     const configPath = profileSyncer.CODEX_CONFIG_FILE;
     const profilePath = profileSyncer.getNativeProfilePath("kimi-dev");
     fs.mkdirSync(path.dirname(configPath), { recursive: true });
-    fs.symlinkSync(profilePath, configPath);
     fs.writeFileSync(profilePath, "profile", "utf-8");
+    fs.writeFileSync(configPath, "profile", "utf-8");
 
     removeProfileAction("kimi-dev");
 

@@ -245,9 +245,11 @@ export function removeNativeProfile(name: string): void {
 }
 
 /**
- * Activate a profile by making ~/.codex/config.toml a symlink to
- * ~/.codex/<name>.config.toml. There is no base config.toml to back up or
- * restore; config.toml exists only as a symlink to the active profile.
+ * Activate a profile for the desktop app by writing the profile content
+ * directly into ~/.codex/config.toml. The desktop app replaces symlinks with
+ * regular files when it saves settings, so we treat config.toml as a writable
+ * copy of the active profile. The per-profile file remains the canonical source
+ * and is regenerated first to ensure it is up to date.
  */
 export function activateProfileConfig(name: string, profile: Profile, proxyBaseUrl: string): void {
   syncNativeProfile(name, profile, proxyBaseUrl);
@@ -255,30 +257,47 @@ export function activateProfileConfig(name: string, profile: Profile, proxyBaseU
   const profilePath = getNativeProfilePath(name);
   const configPath = CODEX_CONFIG_FILE;
 
-  // Ensure config.toml is a symlink to the active profile. If it already
-  // exists as a regular file (e.g. from a previous Codex installation), remove
-  // it first so the desktop app reads from the profile file.
-  if (fs.existsSync(configPath) || (fs.existsSync(configPath) && fs.lstatSync(configPath).isSymbolicLink())) {
+  // Write config.toml as a copy of the profile file. If config.toml is currently
+  // a symlink, replace it with a regular file so the desktop app can rewrite it
+  // without breaking profile switching on future launches.
+  if (fs.existsSync(configPath) && fs.lstatSync(configPath).isSymbolicLink()) {
     fs.unlinkSync(configPath);
   }
 
-  fs.symlinkSync(profilePath, configPath);
-  logger.debug(`activated profile '${name}': ${configPath} -> ${profilePath}`);
+  const content = fs.readFileSync(profilePath, "utf-8");
+  fs.writeFileSync(configPath, content, "utf-8");
+  logger.debug(`activated profile '${name}': wrote ${configPath} from ${profilePath}`);
 }
 
 /**
- * Remove the active symlink if it points to a given profile. There is no base
- * config.toml to restore.
+ * Remove the active config.toml copy if it matches the given profile. This does
+ * not delete a user-created base config.toml that was not written by codex-hub.
  */
 export function deactivateProfileConfig(name: string): void {
   const profilePath = getNativeProfilePath(name);
   const configPath = CODEX_CONFIG_FILE;
 
-  if (fs.existsSync(configPath) && fs.lstatSync(configPath).isSymbolicLink()) {
-    const target = fs.readlinkSync(configPath);
-    if (target === profilePath) {
+  if (!fs.existsSync(configPath)) {
+    return;
+  }
+
+  // Only remove config.toml if it is a regular file with the same content as
+  // the profile we are deactivating. If it is a symlink or has been edited by
+  // the user/desktop app, leave it alone.
+  if (fs.lstatSync(configPath).isSymbolicLink()) {
+    return;
+  }
+
+  try {
+    const current = fs.readFileSync(configPath, "utf-8");
+    const profile = fs.readFileSync(profilePath, "utf-8");
+    if (current === profile) {
       fs.unlinkSync(configPath);
       logger.debug(`deactivated profile '${name}': removed ${configPath}`);
+    }
+  } catch (err: any) {
+    if (err?.code !== "ENOENT") {
+      logger.warn(`failed to deactivate profile '${name}'`, err);
     }
   }
 }
