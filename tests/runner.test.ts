@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { buildCodexCommand } from "../src/profiles/runner.js";
+import { buildCodexCommand, execCodex } from "../src/profiles/runner.js";
 
 describe("runner", () => {
   it("builds CLI command with --profile", () => {
@@ -26,5 +26,11 @@ describe("runner", () => {
       isDesktopApp: true,
     });
     expect(command).toEqual(["codex", "app", "--download-url", "https://example.test"]);
+  });
+
+  it("rejects desktop app launch", async () => {
+    await expect(execCodex("kimi-dev", {}, ["app"])).rejects.toThrow(
+      "Launching the Codex Desktop app via codx is not supported",
+    );
   });
 });

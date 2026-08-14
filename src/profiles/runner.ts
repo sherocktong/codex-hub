@@ -97,9 +97,10 @@ export async function execCodex(profileName: string, p: Profile, extraArgs: stri
   const firstModel = models[0];
   const isDesktopApp = extraArgs[0] === "app";
 
-  if (isDesktopApp && isDesktopAppRunning()) {
-    console.error("Codex Desktop is already running. Shut it down first, or switch profiles from within the app.");
-    process.exit(1);
+  if (isDesktopApp) {
+    throw new Error(
+      "Launching the Codex Desktop app via codx is not supported. Please run `codex app` directly.",
+    );
   }
 
   let acquired;
