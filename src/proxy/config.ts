@@ -5,8 +5,17 @@ import { readJson, writeJson } from "../config.js";
 import * as logger from "../logger.js";
 import type { ProviderConfig, ProxyConfig } from "../types.js";
 
-const PROXY_CONFIG_DIR = path.join(os.homedir(), ".codex", "codx");
-const PROXY_CONFIG_FILE = path.join(PROXY_CONFIG_DIR, "proxy.json");
+function getProxyConfigDir(): string {
+  return process.env.CODX_PROXY_CONFIG_DIR || path.join(os.homedir(), ".codex", "codx");
+}
+
+function getProxyConfigFile(): string {
+  return path.join(getProxyConfigDir(), "proxy.json");
+}
+
+function getProvidersFile(): string {
+  return path.join(getProxyConfigDir(), "providers.json");
+}
 
 const DEFAULT_PROXY_CONFIG: ProxyConfig = {
   listenAddress: "127.0.0.1",
@@ -18,18 +27,20 @@ const DEFAULT_PROXY_CONFIG: ProxyConfig = {
 };
 
 export function ensureProxyConfigDir(): void {
-  if (!fs.existsSync(PROXY_CONFIG_DIR)) {
-    fs.mkdirSync(PROXY_CONFIG_DIR, { recursive: true });
+  const dir = getProxyConfigDir();
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
   }
 }
 
 export function readProxyConfig(): ProxyConfig {
+  const filePath = getProxyConfigFile();
   ensureProxyConfigDir();
-  if (!fs.existsSync(PROXY_CONFIG_FILE)) {
+  if (!fs.existsSync(filePath)) {
     return { ...DEFAULT_PROXY_CONFIG };
   }
   try {
-    return { ...DEFAULT_PROXY_CONFIG, ...readJson<ProxyConfig>(PROXY_CONFIG_FILE) };
+    return { ...DEFAULT_PROXY_CONFIG, ...readJson<ProxyConfig>(filePath) };
   } catch (err) {
     logger.error("Failed to read proxy config", err);
     return { ...DEFAULT_PROXY_CONFIG };
@@ -38,18 +49,17 @@ export function readProxyConfig(): ProxyConfig {
 
 export function writeProxyConfig(config: ProxyConfig): void {
   ensureProxyConfigDir();
-  writeJson(PROXY_CONFIG_FILE, config);
+  writeJson(getProxyConfigFile(), config);
 }
 
-const PROVIDERS_FILE = path.join(PROXY_CONFIG_DIR, "providers.json");
-
 export function readProvidersConfig(): Record<string, ProviderConfig> {
+  const filePath = getProvidersFile();
   ensureProxyConfigDir();
-  if (!fs.existsSync(PROVIDERS_FILE)) {
+  if (!fs.existsSync(filePath)) {
     return {};
   }
   try {
-    return readJson<Record<string, ProviderConfig>>(PROVIDERS_FILE);
+    return readJson<Record<string, ProviderConfig>>(filePath);
   } catch (err) {
     logger.error("Failed to read providers config", err);
     return {};
@@ -58,7 +68,7 @@ export function readProvidersConfig(): Record<string, ProviderConfig> {
 
 export function writeProvidersConfig(providers: Record<string, ProviderConfig>): void {
   ensureProxyConfigDir();
-  writeJson(PROVIDERS_FILE, providers);
+  writeJson(getProvidersFile(), providers);
 }
 
 export function getProviderConfig(id: string): ProviderConfig | undefined {
@@ -85,6 +95,8 @@ export function getDefaultProviderPresets(): Record<string, ProviderConfig> {
       baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
       apiKey: "",
       models: ["qwen-max"],
+      // Qianwen's OpenAI-compatible endpoint supports Anthropic-style
+      // cache_control markers for explicit context caching on supported models.
       promptCacheRouting: "enabled",
       responsesToChatCompletions: true,
     },

@@ -1,4 +1,5 @@
 import type { RequestContext } from "./types.js";
+import * as logger from "../logger.js";
 
 export function selectCacheKeySource(ctx: RequestContext): string | undefined {
   // Prefer a stable session id so repeated calls in the same session hit the cache.
@@ -18,5 +19,6 @@ export function injectPromptCacheKey(
   // OpenAI Chat Completions does not; it relies on prompt_tokens_details.
   if (ctx.path === "/v1/responses") {
     body.prompt_cache_key = key;
+    logger.debug(`kimi cache: injected prompt_cache_key=${key}`);
   }
 }

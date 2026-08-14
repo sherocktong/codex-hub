@@ -1,35 +1,106 @@
-import { spawn } from "node:child_process";
-import fs from "node:fs";
-import path from "node:path";
-import os from "node:os";
+import { spawn, execSync } from "node:child_process";
 import type { Profile } from "../types.js";
 import { createBinaryResolver } from "../platform/index.js";
 import { acquireProfileProxy } from "../proxy/instance-manager.js";
+import { addRegistryConsumer, removeRegistryConsumer } from "../proxy/proxy-registry.js";
+import { syncNativeProfile, activateProfileConfig } from "./profile-syncer.js";
 import * as logger from "../logger.js";
 
-const CODEX_HOME = process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
-const CODEX_CONFIG_FILE = path.join(CODEX_HOME, "config.toml");
+const DESKTOP_APP_START_TIMEOUT_MS = 10000;
+const DESKTOP_APP_POLL_INTERVAL_MS = 1000;
+
+export function isDesktopAppRunning(): boolean {
+  if (process.platform === "win32") {
+    try {
+      execSync("powershell.exe -NoProfile -Command \"Get-Process Codex -ErrorAction SilentlyContinue\"", {
+        stdio: "ignore",
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  // macOS: the desktop app is currently branded as ChatGPT.app with the Codex bundle.
+  try {
+    execSync("pgrep -x ChatGPT >/dev/null 2>&1 || pgrep -x Codex >/dev/null 2>&1");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function waitForDesktopAppToExit(): Promise<void> {
+  // Kept for backwards compatibility; desktop launches now register the app
+  // process as a proxy consumer instead of blocking the CLI.
+  while (isDesktopAppRunning()) {
+    await new Promise((resolve) => setTimeout(resolve, DESKTOP_APP_POLL_INTERVAL_MS));
+  }
+}
 
 export function resolveCodexBinary(): string {
   return createBinaryResolver().resolve();
 }
 
-function readCodexConfig(): string {
-  try {
-    return fs.readFileSync(CODEX_CONFIG_FILE, "utf-8");
-  } catch {
-    return "";
+function getDesktopAppPid(): number | undefined {
+  if (process.platform === "win32") {
+    try {
+      const output = execSync(
+        "powershell.exe -NoProfile -Command \"Get-Process Codex -ErrorAction SilentlyContinue | Select-Object -First 1 Id\"",
+        { encoding: "utf-8" },
+      );
+      const match = output.match(/(\d+)/);
+      if (match) return Number(match[1]);
+    } catch {
+      // ignore
+    }
+    return undefined;
   }
+
+  // macOS: try ChatGPT first, then Codex.
+  for (const name of ["ChatGPT", "Codex"]) {
+    try {
+      const output = execSync(`pgrep -x ${name}`, { encoding: "utf-8" });
+      const pid = Number(output.trim().split("\n")[0]);
+      if (Number.isFinite(pid) && pid > 0) return pid;
+    } catch {
+      // ignore
+    }
+  }
+  return undefined;
 }
 
-function detectCodexProviderName(configText: string): string {
-  const match = configText.match(/^model_provider\s*=\s*["']([^"']+)["']/m);
-  return match?.[1] || "custom";
+async function waitForDesktopAppStart(): Promise<number | undefined> {
+  const deadline = Date.now() + DESKTOP_APP_START_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    const pid = getDesktopAppPid();
+    if (pid) return pid;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  return undefined;
+}
+
+export function buildCodexCommand(args: {
+  binary: string;
+  profileName: string;
+  extraArgs: string[];
+  isDesktopApp: boolean;
+}): string[] {
+  if (args.isDesktopApp) {
+    return [args.binary, ...args.extraArgs];
+  }
+  return [args.binary, "--profile", args.profileName, ...args.extraArgs];
 }
 
 export async function execCodex(profileName: string, p: Profile, extraArgs: string[]): Promise<void> {
   const models = p.models || (p.model ? [p.model] : []);
   const firstModel = models[0];
+  const isDesktopApp = extraArgs[0] === "app";
+
+  if (isDesktopApp && isDesktopAppRunning()) {
+    console.error("Codex Desktop is already running. Shut it down first, or switch profiles from within the app.");
+    process.exit(1);
+  }
 
   let acquired;
   try {
@@ -40,25 +111,26 @@ export async function execCodex(profileName: string, p: Profile, extraArgs: stri
   }
 
   const binary = resolveCodexBinary();
-  const cmd = [binary];
-  if (firstModel) cmd.push("--model", firstModel);
-
-  // Codex CLI's config.toml provider base_url takes precedence over OPENAI_BASE_URL.
-  // Override it so requests are routed through our local proxy.
-  const providerName = detectCodexProviderName(readCodexConfig());
   const proxyBaseUrl = `${acquired.running.server.baseUrl}/v1`;
-  // The Codex CLI requires each model_providers entry to have a non-empty `name`
-  // field matching its table key; without it config loading fails with:
-  // "model_providers.<name>: provider name must not be empty".
-  cmd.push("-c", `model_providers.${providerName}.name="${providerName}"`);
-  cmd.push("-c", `model_providers.${providerName}.base_url="${proxyBaseUrl}"`);
-  // Without this override Codex CLI defaults to the built-in OpenAI provider and
-  // sends requests to api.openai.com, causing a 401 when the profile token is a
-  // third-party key (e.g. Kimi). Force the active provider to the one we just
-  // configured so traffic is routed through our local proxy.
-  cmd.push("-c", `model_provider="${providerName}"`);
 
-  cmd.push(...extraArgs);
+  if (isDesktopApp) {
+    // The desktop app is launched by the OS launcher and cannot receive
+    // --profile. Activate the profile by symlinking config.toml to the profile
+    // file so the desktop app uses it.
+    activateProfileConfig(profileName, p, proxyBaseUrl);
+    logger.info(
+      `Activated profile '${profileName}' for desktop: config.toml -> ${profileName}.config.toml (proxy=${proxyBaseUrl} model=${firstModel || "(default)"})`,
+    );
+  } else {
+    // CLI Codex supports --profile. Sync the profile file but leave the base
+    // config.toml untouched so other launches are not affected.
+    await syncNativeProfile(profileName, p, proxyBaseUrl);
+    logger.info(
+      `Synced profile '${profileName}': ${profileName}.config.toml (proxy=${proxyBaseUrl} model=${firstModel || "(default)"})`,
+    );
+  }
+
+  const command = buildCodexCommand({ binary, profileName, extraArgs, isDesktopApp });
 
   const env: Record<string, string | undefined> = {
     ...process.env,
@@ -66,19 +138,38 @@ export async function execCodex(profileName: string, p: Profile, extraArgs: stri
     OPENAI_BASE_URL: proxyBaseUrl,
   };
 
-  logger.info(`Launching Codex with profile '${profileName}': model=${firstModel || "(default)"} proxy=${acquired.running.server.baseUrl} provider=${p.provider || "openai"} binary=${binary}`);
+  if (isDesktopApp) {
+    console.error(`Launching Codex Desktop with profile '${profileName}'`);
+  }
 
-  const child = spawn(cmd[0], cmd.slice(1), {
-    stdio: "inherit",
+  logger.info(`Launching Codex with profile '${profileName}': model=${firstModel || "(default)"} proxy=${acquired.running.server.baseUrl} provider=${p.provider || "openai"} binary=${binary}`);
+  logger.debug(`Codex command: ${command.map((arg) => (arg.includes(" ") ? `"${arg}"` : arg)).join(" ")}`);
+
+  const child = spawn(command[0], command.slice(1), {
+    stdio: "ignore",
     env,
     shell: process.platform === "win32",
+    detached: false,
   });
 
   return new Promise((resolve) => {
     child.on("exit", async (code) => {
+      if (isDesktopApp) {
+        // The desktop app is launched by the OS launcher, not as our child, so
+        // the child exits immediately after opening the app. Register the actual
+        // desktop process as a proxy consumer so the daemon stays alive, then
+        // let the CLI exit.
+        const desktopPid = await waitForDesktopAppStart();
+        if (desktopPid) {
+          addRegistryConsumer(profileName, desktopPid);
+          logger.debug(`Registered desktop app PID ${desktopPid} as proxy consumer for '${profileName}'`);
+        } else {
+          logger.warn(`Could not detect desktop app PID; proxy may shut down when this CLI exits`);
+        }
+      }
       acquired.release();
       resolve();
-      process.exit(code ?? 1);
+      process.exit(code ?? 0);
     });
   });
 }

@@ -53,6 +53,7 @@ export interface AcquiredProxy {
 
 export async function acquireProfileProxy(profileName: string): Promise<AcquiredProxy> {
   ensureProfilesFile();
+  ensureProviderPresetsExist();
   const data = readJson<ProfilesData>(PROFILES_FILE);
   const profile = data.profiles[profileName];
   if (!profile) {
@@ -60,7 +61,6 @@ export async function acquireProfileProxy(profileName: string): Promise<Acquired
   }
 
   const config = buildProxyInstanceConfig(profileName, profile);
-  ensureProviderPresetsExist();
 
   const acquisition = await proxyRegistry.acquireProxy(
     profileName,
@@ -69,7 +69,7 @@ export async function acquireProfileProxy(profileName: string): Promise<Acquired
       // Start the proxy in a detached daemon so it outlives this consumer.
       const daemon = await startProxyDaemon(profileName);
       localDaemons.set(profileName, { pid: daemon.pid, kill: daemon.kill });
-      return { baseUrl: daemon.baseUrl, port: daemon.port };
+      return { baseUrl: daemon.baseUrl, port: daemon.port, proxyPid: daemon.pid };
     },
   );
 

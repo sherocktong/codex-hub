@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
+import { execSync } from "node:child_process";
 import * as logger from "../logger.js";
 
 export function getProxyConfigDir(): string {
@@ -41,9 +42,19 @@ function ensureConfigDir(): void {
 }
 
 export function isProcessAlive(pid: number): boolean {
+  if (pid === process.pid) {
+    return true;
+  }
   try {
     process.kill(pid, 0);
-    return true;
+    if (process.platform === "win32") {
+      return true;
+    }
+    // On Unix, kill(0) succeeds for zombie processes that have not been reaped.
+    // Check ps state and treat zombies as dead.
+    const output = execSync(`ps -o stat= -p ${pid}`, { encoding: "utf-8", stdio: "pipe" });
+    const state = output.trim();
+    return !state.startsWith("Z");
   } catch {
     return false;
   }
@@ -60,7 +71,7 @@ function readLockPid(): number | undefined {
   return undefined;
 }
 
-function tryAcquireLock(): boolean {
+function tryAcquireLockOnce(): boolean {
   try {
     const fd = fs.openSync(LOCK_FILE, "wx");
     fs.writeSync(fd, String(process.pid));
@@ -72,7 +83,7 @@ function tryAcquireLock(): boolean {
       if (holder && !isProcessAlive(holder)) {
         try {
           fs.unlinkSync(LOCK_FILE);
-          return tryAcquireLock();
+          return tryAcquireLockOnce();
         } catch {
           return false;
         }
@@ -82,10 +93,14 @@ function tryAcquireLock(): boolean {
   }
 }
 
+export function tryAcquireLock(): boolean {
+  return tryAcquireLockOnce();
+}
+
 export function acquireLock(): void {
   const deadline = Date.now() + LOCK_TIMEOUT_MS;
   while (Date.now() < deadline) {
-    if (tryAcquireLock()) return;
+    if (tryAcquireLockOnce()) return;
     // Synchronous but bounded wait; acceptable because registry ops are fast.
     const remaining = deadline - Date.now();
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Math.min(LOCK_RETRY_MS, remaining));
@@ -172,7 +187,7 @@ export interface ProxyAcquisition {
 export async function acquireProxy(
   profileName: string,
   listenAddress: string,
-  startServer: () => Promise<{ baseUrl: string; port: number }>,
+  startServer: () => Promise<{ baseUrl: string; port: number; proxyPid?: number }>,
 ): Promise<ProxyAcquisition> {
   acquireLock();
   try {
@@ -182,7 +197,17 @@ export async function acquireProxy(
     const existing = registry[profileName];
     if (existing) {
       const baseUrl = `http://${existing.listenAddress}:${existing.port}`;
-      if (await checkProxyHealth(baseUrl)) {
+      // The daemon may still be initializing its HTTP handler when the registry
+      // entry is written. Retry briefly before treating it as unhealthy.
+      let healthy = false;
+      for (let attempt = 0; attempt < 5; attempt++) {
+        if (await checkProxyHealth(baseUrl)) {
+          healthy = true;
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 200));
+      }
+      if (healthy) {
         if (!existing.consumers.includes(process.pid)) {
           existing.consumers.push(process.pid);
         }
@@ -204,7 +229,7 @@ export async function acquireProxy(
       profileName,
       listenAddress,
       port: server.port,
-      proxyPid: process.pid,
+      proxyPid: server.proxyPid ?? process.pid,
       consumers: [process.pid],
       startedAt: Date.now(),
     };
@@ -214,7 +239,7 @@ export async function acquireProxy(
     return {
       baseUrl: server.baseUrl,
       port: server.port,
-      ownerPid: process.pid,
+      ownerPid: entry.proxyPid,
       isOwner: true,
     };
   } finally {
@@ -252,6 +277,48 @@ export function releaseProxy(
     registry[profileName] = entry;
     writeRegistry(registry);
     return { remainingConsumers, stopped: false };
+  } finally {
+    releaseLock();
+  }
+}
+
+export function addRegistryConsumer(profileName: string, consumerPid: number): boolean {
+  acquireLock();
+  try {
+    let registry = readRegistry();
+    registry = cleanDeadEntries(registry);
+
+    const entry = registry[profileName];
+    if (!entry) {
+      return false;
+    }
+
+    if (!entry.consumers.includes(consumerPid)) {
+      entry.consumers.push(consumerPid);
+    }
+    registry[profileName] = entry;
+    writeRegistry(registry);
+    return true;
+  } finally {
+    releaseLock();
+  }
+}
+
+export function removeRegistryConsumer(profileName: string, consumerPid: number): boolean {
+  acquireLock();
+  try {
+    let registry = readRegistry();
+    registry = cleanDeadEntries(registry);
+
+    const entry = registry[profileName];
+    if (!entry) {
+      return false;
+    }
+
+    entry.consumers = entry.consumers.filter((pid) => pid !== consumerPid);
+    registry[profileName] = entry;
+    writeRegistry(registry);
+    return true;
   } finally {
     releaseLock();
   }

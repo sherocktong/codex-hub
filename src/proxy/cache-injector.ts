@@ -1,5 +1,6 @@
 import type { RequestContext } from "./types.js";
 import { injectPromptCacheKey } from "./cache-key.js";
+import * as logger from "../logger.js";
 
 interface ContentBlock {
   type?: string;
@@ -51,9 +52,11 @@ function injectQwenCacheMarkers(body: Record<string, unknown>): void {
 
   const existingMarkers = countExistingCacheControls(messages);
   if (existingMarkers >= MAX_CACHE_MARKERS) {
+    logger.debug(`qianwen cache: ${existingMarkers} existing markers, skipping injection`);
     return;
   }
   let remaining = MAX_CACHE_MARKERS - existingMarkers;
+  const markersBeforeInjection = remaining;
 
   // 1. Cache the system prompt if present. It is the most reusable prefix.
   const systemIndex = messages.findIndex(
@@ -66,6 +69,9 @@ function injectQwenCacheMarkers(body: Record<string, unknown>): void {
   }
 
   if (remaining <= 0) {
+    logger.debug(
+      `qianwen cache: injected ${markersBeforeInjection - remaining} new markers`,
+    );
     return;
   }
 
@@ -86,6 +92,10 @@ function injectQwenCacheMarkers(body: Record<string, unknown>): void {
       markMessage(firstMessage);
     }
   }
+
+  logger.debug(
+    `qianwen cache: injected ${markersBeforeInjection - remaining} new markers`,
+  );
 }
 
 function cloneContent(content: unknown): unknown {

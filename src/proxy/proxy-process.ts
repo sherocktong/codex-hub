@@ -46,7 +46,10 @@ export async function startProxyDaemon(profileName: string): Promise<ProxyDaemon
     const child = spawn(process.execPath, args, {
       detached: true,
       stdio: ["ignore", "pipe", "pipe"],
-      env: process.env,
+      env: {
+        ...process.env,
+        CODX_PROXY_PARENT_PID: String(process.pid),
+      },
     });
     child.unref();
 

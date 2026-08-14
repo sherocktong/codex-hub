@@ -354,6 +354,77 @@ describe("proxy integration", () => {
     expect(content[0].cache_control).toBeUndefined();
   });
 
+  it("terminates the stream when an SSE chunk cannot be parsed or transformed", async () => {
+    upstream = http.createServer((req, res) => {
+      res.writeHead(200, { "Content-Type": "text/event-stream" });
+      // First a valid Chat Completions SSE chunk.
+      res.write(
+        "data: " +
+          JSON.stringify({
+            id: "chatcmpl-test",
+            object: "chat.completion.chunk",
+            created: 1,
+            model: "kimi-k2-5-coding",
+            choices: [{ index: 0, delta: { role: "assistant", content: "Hello" } }],
+          }) +
+          "\n\n",
+      );
+      // Then a malformed chunk that will fail JSON.parse and must not be forwarded raw.
+      res.write("data: this is not valid json\n\n");
+      res.end();
+    });
+
+    const upstreamPort = await new Promise<number>((resolve) => {
+      upstream!.listen(0, "127.0.0.1", () => {
+        resolve((upstream!.address() as { port: number }).port);
+      });
+    });
+
+    const config: ProxyInstanceConfig = {
+      profileName: "test",
+      port: 0,
+      listenAddress: "127.0.0.1",
+      providers: [
+        {
+          id: "kimi",
+          type: "kimi",
+          name: "Kimi",
+          baseUrl: `http://127.0.0.1:${upstreamPort}`,
+          apiKey: "test-key",
+          models: ["kimi-k2-5-coding"],
+          responsesToChatCompletions: true,
+        },
+      ],
+      requestTimeout: 5000,
+      maxRetries: 0,
+      streamingFirstByteTimeout: 5000,
+      streamingIdleTimeout: 5000,
+      nonStreamingTimeout: 5000,
+    };
+
+    proxyServer = await startProxyServer(config.port, config.listenAddress, createRequestHandler(config));
+
+    const response = await fetch(`${proxyServer.baseUrl}/v1/responses`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: "Bearer client" },
+      body: JSON.stringify({
+        model: "kimi-k2.7",
+        stream: true,
+        input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "hello" }] }],
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    const text = await response.text();
+    // The valid chunk should have been translated to a Responses API event.
+    expect(text).toContain("response.output_text.delta");
+    // The proxy should emit a response.failed event with a structured error.
+    expect(text).toContain('"type":"response.failed"');
+    expect(text).toContain("Stream transform error");
+    // The malformed raw line must not have been forwarded.
+    expect(text).not.toContain("this is not valid json");
+  });
+
   it("returns models from the configured providers", async () => {
     const config: ProxyInstanceConfig = {
       profileName: "test",

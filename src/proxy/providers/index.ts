@@ -70,7 +70,11 @@ export function normalizeModel(
 export function buildUpstreamUrl(provider: ProviderConfig, path: string): string {
   const base = provider.baseUrl.replace(/\/+$/, "");
   const normalizedPath = path.startsWith("/") ? path : `/${path}`;
-  // Kimi/Qianwen OpenAI-compatible endpoints expect /v1/...
+  // Provider base URLs often already include /v1 (e.g. Qianwen's DashScope
+  // compatible-mode endpoint). Avoid generating /v1/v1/... in that case.
+  if (normalizedPath.startsWith("/v1/") && base.endsWith("/v1")) {
+    return `${base}${normalizedPath.slice(3)}`;
+  }
   return `${base}${normalizedPath}`;
 }
 
