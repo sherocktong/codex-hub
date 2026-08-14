@@ -5,7 +5,7 @@ import { readJson, writeJson } from "../config.js";
 import * as logger from "../logger.js";
 import type { ProviderConfig, ProxyConfig } from "../types.js";
 
-const PROXY_CONFIG_DIR = path.join(os.homedir(), ".codex", "codex-hub");
+const PROXY_CONFIG_DIR = path.join(os.homedir(), ".codex", "codx");
 const PROXY_CONFIG_FILE = path.join(PROXY_CONFIG_DIR, "proxy.json");
 
 const DEFAULT_PROXY_CONFIG: ProxyConfig = {

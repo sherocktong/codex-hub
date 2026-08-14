@@ -9,6 +9,7 @@ import { completionCommand } from "./complete/index.js";
 import { providerListCommand } from "./proxy/index.js";
 import { cacheCommand } from "./cache/index.js";
 import { codexVersionCommand } from "./codex-version/index.js";
+import { proxyServerCommand } from "./proxy/proxy-command.js";
 import type { SettingsData } from "./types.js";
 
 const _require = createRequire(import.meta.url);
@@ -24,7 +25,7 @@ installGlobalExceptionHandlers();
 const program = new Command();
 
 program
-  .name("codex-hub")
+  .name("codx")
   .description("Manage Codex CLI profiles, hooks, sessions, and providers")
   .version(version);
 
@@ -38,6 +39,7 @@ program.addCommand(completionCommand());
 program.addCommand(providerListCommand());
 program.addCommand(cacheCommand());
 program.addCommand(codexVersionCommand());
+program.addCommand(proxyServerCommand());
 
 try {
   program.parse();

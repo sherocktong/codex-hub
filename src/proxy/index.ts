@@ -1,3 +1,11 @@
 export { providerListCommand } from "./commands.js";
-export { startProfileProxy, stopProfileProxy, listRunningProxies, getRunningProxy } from "./instance-manager.js";
-export type { RunningProxy } from "./instance-manager.js";
+export {
+  acquireProfileProxy,
+  reserveProxyPort,
+  reserveProxyPortAsync,
+  stopProfileProxy,
+  stopAllProxies,
+  listRunningProxies,
+  getRunningProxy,
+} from "./instance-manager.js";
+export type { RunningProxy, AcquiredProxy } from "./instance-manager.js";

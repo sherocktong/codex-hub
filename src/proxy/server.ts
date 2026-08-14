@@ -25,7 +25,7 @@ async function isPortAvailable(port: number, listenAddress: string): Promise<boo
   });
 }
 
-async function findAvailablePort(listenAddress: string): Promise<number> {
+export async function findAvailablePort(listenAddress: string): Promise<number> {
   const candidate = Math.floor(Math.random() * (PORT_RANGE_MAX - PORT_RANGE_MIN + 1)) + PORT_RANGE_MIN;
   if (await isPortAvailable(candidate, listenAddress)) {
     return candidate;
@@ -62,7 +62,6 @@ export async function startProxyServer(
 
   return new Promise((resolve, reject) => {
     server.listen(actualPort, listenAddress, () => {
-      server.unref();
       const addr = server.address();
       if (!addr || typeof addr !== "object") {
         reject(new Error("Failed to determine server address"));

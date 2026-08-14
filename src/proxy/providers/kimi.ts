@@ -28,7 +28,7 @@ export const kimiAdapter: ProviderAdapter = {
     const headers = new Headers(ctx.headers);
     headers.set("Authorization", `Bearer ${ctx.provider.apiKey}`);
     headers.set("Content-Type", "application/json");
-    headers.set("User-Agent", "codex-hub/0.1.0");
+    headers.set("User-Agent", "codx/0.1.0");
     headers.delete("host");
     headers.delete("content-length");
 
@@ -72,8 +72,7 @@ export const kimiAdapter: ProviderAdapter = {
 
   transformStreamChunk(ctx: RequestContext, chunk: Record<string, unknown>): Record<string, unknown> | Record<string, unknown>[] {
     if (ctx.path === "/v1/responses" && shouldTranslateResponsesToChat(ctx.provider)) {
-      const translated = translateChatStreamChunkToResponses(ctx, chunk, ctx.body);
-      return translated ?? chunk;
+      return translateChatStreamChunkToResponses(ctx, chunk, ctx.body);
     }
 
     const choices = chunk.choices as Array<Record<string, unknown>> | undefined;

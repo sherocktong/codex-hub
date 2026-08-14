@@ -56,7 +56,13 @@ describe("responses-to-chat-completions translator", () => {
         content: [{ type: "output_text", text: "Hi there" }],
       },
     ]);
-    expect(translated.usage).toMatchObject({ input_tokens: 10, output_tokens: 2, total_tokens: 12 });
+    expect(translated.usage).toMatchObject({
+      input_tokens: 10,
+      output_tokens: 2,
+      total_tokens: 12,
+      input_tokens_details: { cached_tokens: 0 },
+      output_tokens_details: { reasoning_tokens: 0 },
+    });
   });
 
   it("translates a streaming chat completion chunk", () => {
@@ -98,6 +104,93 @@ describe("responses-to-chat-completions translator", () => {
     expect(events[0].type).toBe("response.completed");
     expect((events[0].response as Record<string, unknown>).status).toBe("completed");
     expect((events[0].response as Record<string, unknown>).output).toEqual([]);
+  });
+
+  it("translates streaming tool call chunks to function_call events", () => {
+    const ctx = { state: {} };
+    const originalBody = { model: "kimi-k2.7" };
+
+    const firstChunk = translateChatStreamChunkToResponses(
+      ctx,
+      {
+        id: "chatcmpl-tool",
+        created: 1234567890,
+        choices: [{ delta: { role: "assistant" } }],
+      },
+      originalBody,
+    );
+    expect(firstChunk?.[0].type).toBe("response.created");
+
+    const secondChunk = translateChatStreamChunkToResponses(
+      ctx,
+      {
+        id: "chatcmpl-tool",
+        created: 1234567890,
+        choices: [
+          {
+            delta: {
+              tool_calls: [
+                {
+                  index: 0,
+                  id: "call_abc",
+                  type: "function",
+                  function: { name: "calculator", arguments: "" },
+                },
+              ],
+            },
+          },
+        ],
+      },
+      originalBody,
+    );
+    expect(secondChunk?.some((e) => e.type === "response.output_item.added")).toBe(true);
+    const added = secondChunk?.find((e) => e.type === "response.output_item.added") as Record<string, unknown>;
+    expect((added.item as Record<string, unknown>).type).toBe("function_call");
+    expect((added.item as Record<string, unknown>).name).toBe("calculator");
+
+    const thirdChunk = translateChatStreamChunkToResponses(
+      ctx,
+      {
+        id: "chatcmpl-tool",
+        created: 1234567890,
+        choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: "{\"x\": 1}" } }] } }],
+      },
+      originalBody,
+    );
+    expect(thirdChunk?.some((e) => e.type === "response.function_call_arguments.delta")).toBe(true);
+
+    const finalChunk = translateChatStreamChunkToResponses(
+      ctx,
+      {
+        id: "chatcmpl-tool",
+        created: 1234567890,
+        choices: [{ delta: {}, finish_reason: "tool_calls" }],
+      },
+      originalBody,
+    );
+    expect(finalChunk?.some((e) => e.type === "response.function_call_arguments.done")).toBe(true);
+    expect(finalChunk?.some((e) => e.type === "response.output_item.done")).toBe(true);
+    expect(finalChunk?.some((e) => e.type === "response.completed")).toBe(true);
+  });
+
+  it("includes prompt cache details in streaming usage", () => {
+    const ctx = { state: { textOutputItemAdded: true, accumulatedText: "Hello" } };
+    const translated = translateChatStreamChunkToResponses(
+      ctx,
+      {
+        id: "chatcmpl-cache",
+        created: 1234567890,
+        choices: [{ delta: {}, finish_reason: "stop", usage: { prompt_tokens: 10, completion_tokens: 2, total_tokens: 12, cached_tokens: 5 } }],
+      },
+      { model: "kimi-k2.7" },
+    );
+    const completed = translated.find((e) => e.type === "response.completed") as Record<string, unknown> | undefined;
+    expect(completed).toBeDefined();
+    const usage = (completed?.response as Record<string, unknown> | undefined)?.usage as Record<string, unknown> | undefined;
+    expect(usage?.input_tokens).toBe(10);
+    expect(usage?.output_tokens).toBe(2);
+    expect(usage?.total_tokens).toBe(12);
+    expect((usage?.input_tokens_details as Record<string, unknown>)?.cached_tokens).toBe(5);
   });
 
   it("converts Responses API tools to Chat Completions format", () => {

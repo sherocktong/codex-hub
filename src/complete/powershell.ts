@@ -1,4 +1,4 @@
-export const POWERSHELL_COMPLETION = `Register-ArgumentCompleter -Native -CommandName codex-hub -ScriptBlock {
+export const POWERSHELL_COMPLETION = `Register-ArgumentCompleter -Native -CommandName codx -ScriptBlock {
   param($wordToComplete, $commandAst, $cursorPosition)
 
   $commands = @(

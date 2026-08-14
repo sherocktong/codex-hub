@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 
-const LOG_DIR = path.join(os.homedir(), ".codex", "codex-hub", "logs");
+const LOG_DIR = path.join(os.homedir(), ".codex", "codx", "logs");
 
 const LEVEL_PRIORITY: Record<string, number> = {
   DEBUG: 0,
@@ -32,7 +32,7 @@ function ensureLogDir(): void {
 
 function logFilePath(): string {
   const date = new Date().toISOString().slice(0, 10);
-  return path.join(LOG_DIR, `codex-hub-${date}.log`);
+  return path.join(LOG_DIR, `codx-${date}.log`);
 }
 
 function formatLine(level: string, message: string): string {

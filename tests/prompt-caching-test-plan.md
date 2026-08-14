@@ -2,7 +2,7 @@
 
 ## 1. Objectives
 
-Verify that `codex-hub` correctly routes OpenAI-compatible requests to Kimi and Qianwen upstreams so that prompt caching is enabled, stable, observable, and cost-efficient. The test plan covers unit, integration, and end-to-end scenarios.
+Verify that `codx` correctly routes OpenAI-compatible requests to Kimi and Qianwen upstreams so that prompt caching is enabled, stable, observable, and cost-efficient. The test plan covers unit, integration, and end-to-end scenarios.
 
 ## 2. Scope
 
@@ -33,14 +33,14 @@ Verify that `codex-hub` correctly routes OpenAI-compatible requests to Kimi and 
 | Unit | Test pure functions in isolation. | Vitest |
 | Integration | Test adapters + cache-key logic with mocked `fetch`. | Vitest + `vi.fn()` |
 | Server | Spin up `startProxyServer` with `createRequestHandler` and a local mock upstream. | Vitest + `node:http` |
-| E2E CLI | Use the linked `codex-hub` binary to start a profile proxy and call `/v1/responses`. | Shell + `curl` |
+| E2E CLI | Use the linked `codx` binary to start a profile proxy and call `/v1/responses`. | Shell + `curl` |
 
 ## 4. Test Environment
 
 - Node.js 18+.
-- `codex-hub` built and linked via `npm link`.
+- `codx` built and linked via `npm link`.
 - Local mock upstream on `127.0.0.1` random port.
-- `~/.codex/codex-hub/providers.json` contains the default Kimi and Qianwen presets.
+- `~/.codex/codx/providers.json` contains the default Kimi and Qianwen presets.
 
 ## 5. Detailed Test Cases
 
@@ -114,10 +114,10 @@ Verify that `codex-hub` correctly routes OpenAI-compatible requests to Kimi and 
 
 | ID | Scenario | Steps | Expected Result | Priority |
 |----|----------|-------|-----------------|----------|
-| CLI-01 | `provider list` | Run `codex-hub provider list`. | Lists Kimi and Qianwen with `promptCacheRouting: enabled`. | P1 |
+| CLI-01 | `provider list` | Run `codx provider list`. | Lists Kimi and Qianwen with `promptCacheRouting: enabled`. | P1 |
 | CLI-02 | `profile add -p kimi` | Add a profile with Kimi provider. | Output shows proxy URL and provider URL. | P1 |
-| CLI-03 | `run` starts proxy | Run `codex-hub run <profile>` and hit `/health`. | Returns `200 ok`. | P1 |
-| CLI-04 | `unproxy` stops all | Start two profile proxies, run `codex-hub unproxy`, retry `/health`. | Both proxies are unreachable. | P1 |
+| CLI-03 | `run` starts proxy | Run `codx run <profile>` and hit `/health`. | Returns `200 ok`. | P1 |
+| CLI-04 | `unproxy` stops all | Start two profile proxies, run `codx unproxy`, retry `/health`. | Both proxies are unreachable. | P1 |
 | CLI-05 | Cache key in response | Send two identical `/v1/responses` via proxy. | Both include stable `prompt_cache_key`; mock upstream sees the same key. | P1 |
 
 ## 6. Test Data
@@ -136,7 +136,7 @@ Verify that `codex-hub` correctly routes OpenAI-compatible requests to Kimi and 
 
 - `npm run build` succeeds.
 - `npm test` currently passes.
-- `codex-hub --version` works when linked.
+- `codx --version` works when linked.
 
 ### Exit criteria
 

@@ -1,10 +1,10 @@
 {
-  "name": "codex-hub-cli",
+  "name": "codx-hub-cli",
   "version": "0.1.0",
   "description": "Manage Codex CLI profiles, hooks, sessions, and providers",
   "type": "module",
   "bin": {
-    "codex-hub": "./dist/index.js"
+    "codx": "./dist/index.js"
   },
   "scripts": {
     "build": "tsup",

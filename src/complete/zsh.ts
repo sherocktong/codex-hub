@@ -1,6 +1,6 @@
-export const ZSH_COMPLETION = `#compdef codex-hub
+export const ZSH_COMPLETION = `#compdef codx
 
-_codex-hub() {
+_codx() {
   local -a commands
   commands=(
     'profile:Manage Codex CLI profiles'
@@ -58,7 +58,7 @@ _codex-hub() {
     'unpin:Remove the Codex CLI version pin'
   )
 
-  _codex_hub_profiles() {
+  _codx_profiles() {
     local profiles_file="\${CODEX_PROFILES_FILE:-\$HOME/.codex/profiles.json}"
     if [[ -f "$profiles_file" ]]; then
       local -a names
@@ -67,7 +67,7 @@ _codex-hub() {
     fi
   }
 
-  _codex_hub_models_for_profile() {
+  _codx_models_for_profile() {
     local profile_name="$1"
     local profiles_file="\${CODEX_PROFILES_FILE:-\$HOME/.codex/profiles.json}"
     if [[ -f "$profiles_file" && -n "$profile_name" ]]; then
@@ -83,7 +83,7 @@ _codex-hub() {
 
   case $state in
     command)
-      _describe -t commands 'codex-hub command' commands
+      _describe -t commands 'codx command' commands
       ;;
     args)
       case $words[1] in
@@ -91,19 +91,19 @@ _codex-hub() {
           if (( CURRENT == 2 )); then
             _describe -t profile-subcmds 'profile subcommand' profile_subcmds
           elif [[ $words[2] == "view" || $words[2] == "remove" ]]; then
-            _codex_hub_profiles
+            _codx_profiles
           elif [[ $words[2] == "rename" ]]; then
             if (( CURRENT == 3 )); then
-              _codex_hub_profiles
+              _codx_profiles
             fi
           elif [[ $words[2] == "update" ]]; then
             if (( CURRENT == 3 )); then
-              _codex_hub_profiles
+              _codx_profiles
             else
               words=("stub" $words[3,-1])
               (( CURRENT-- ))
               _arguments -C -S \\\\
-                '1:profile:_codex_hub_profiles' \\\\
+                '1:profile:_codx_profiles' \\\\
                 '(-m --model)*'{-m,--model}'[Model ID]:model:->profileModel' \\\\
                 '(-d --delete-model)*'{-d,--delete-model}'[Remove model ID]:model:->profileModel' \\\\
                 '(-t --token)'{-t,--token}'[API key / token]:token:' \\\\
@@ -111,14 +111,14 @@ _codex-hub() {
                 '(-p --provider)'{-p,--provider}'[Provider type]:provider:(kimi qianwen)'
               case $state in
                 profileModel)
-                  _codex_hub_models_for_profile $line[1]
+                  _codx_models_for_profile $line[1]
                   ;;
               esac
             fi
           fi
           ;;
         use|run)
-          '*:profile:_codex_hub_profiles'
+          '*:profile:_codx_profiles'
           ;;
         provider)
           ;;
@@ -154,5 +154,5 @@ _codex-hub() {
   esac
 }
 
-compdef _codex-hub codex-hub
+compdef _codx codx
 `;

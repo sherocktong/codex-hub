@@ -1,9 +1,10 @@
 import type { Profile, ProfilesData } from "../types.js";
 import { PROFILES_FILE, ensureProfilesFile, readJson, writeJson } from "../config.js";
 import { readProxyConfig, getProviderConfig, getDefaultProviderPresets, writeProvidersConfig, readProvidersConfig } from "./config.js";
-import { startProxyServer, type ProxyServer } from "./server.js";
-import { createRequestHandler } from "./handlers.js";
+import { startProxyServer, findAvailablePort, type ProxyServer } from "./server.js";
 import * as logger from "../logger.js";
+import * as proxyRegistry from "./proxy-registry.js";
+import { startProxyDaemon } from "./proxy-process.js";
 import type { ProviderConfig, ProxyInstanceConfig } from "./types.js";
 
 export interface RunningProxy {
@@ -13,17 +14,44 @@ export interface RunningProxy {
   startedAt: Date;
 }
 
-const runningProxies = new Map<string, RunningProxy>();
+const localServers = new Map<string, ProxyServer>();
+const localDaemons = new Map<string, { pid: number; kill: () => Promise<void> }>();
 
 export function listRunningProxies(): RunningProxy[] {
-  return Array.from(runningProxies.values());
+  const registry = proxyRegistry.cleanDeadEntries(proxyRegistry.readRegistry());
+  return Object.values(registry).map((entry) => ({
+    profileName: entry.profileName,
+    config: buildProxyInstanceConfig(entry.profileName, readJson<ProfilesData>(PROFILES_FILE).profiles[entry.profileName]),
+    startedAt: new Date(entry.startedAt),
+    server: {
+      baseUrl: `http://${entry.listenAddress}:${entry.port}`,
+      port: entry.port,
+      stop: async () => { /* no-op: stopping is registry-managed */ },
+    },
+  }));
 }
 
 export function getRunningProxy(profileName: string): RunningProxy | undefined {
-  return runningProxies.get(profileName);
+  const entry = proxyRegistry.getRegistryEntry(profileName);
+  if (!entry) return undefined;
+  return {
+    profileName: entry.profileName,
+    config: buildProxyInstanceConfig(profileName, readJson<ProfilesData>(PROFILES_FILE).profiles[profileName]),
+    startedAt: new Date(entry.startedAt),
+    server: {
+      baseUrl: `http://${entry.listenAddress}:${entry.port}`,
+      port: entry.port,
+      stop: async () => { /* no-op */ },
+    },
+  };
 }
 
-export async function startProfileProxy(profileName: string): Promise<RunningProxy> {
+export interface AcquiredProxy {
+  running: RunningProxy;
+  release: () => void;
+}
+
+export async function acquireProfileProxy(profileName: string): Promise<AcquiredProxy> {
   ensureProfilesFile();
   const data = readJson<ProfilesData>(PROFILES_FILE);
   const profile = data.profiles[profileName];
@@ -31,27 +59,45 @@ export async function startProfileProxy(profileName: string): Promise<RunningPro
     throw new Error(`Profile '${profileName}' not found.`);
   }
 
-  const existing = runningProxies.get(profileName);
-  if (existing) {
-    logger.debug(`Proxy for profile '${profileName}' already running on ${existing.server.baseUrl}`);
-    return existing;
-  }
-
   const config = buildProxyInstanceConfig(profileName, profile);
   ensureProviderPresetsExist();
 
-  const requestHandler = createRequestHandler(config);
-  const server = await startProxyServer(config.port, config.listenAddress, requestHandler);
+  const acquisition = await proxyRegistry.acquireProxy(
+    profileName,
+    config.listenAddress,
+    async () => {
+      // Start the proxy in a detached daemon so it outlives this consumer.
+      const daemon = await startProxyDaemon(profileName);
+      localDaemons.set(profileName, { pid: daemon.pid, kill: daemon.kill });
+      return { baseUrl: daemon.baseUrl, port: daemon.port };
+    },
+  );
 
-  // Update config with the actual bound port if port was 0 (auto-allocated)
-  config.port = server.port;
-
-  // Persist the allocated port to the profile so future commands can display it even when the proxy is not running.
-  if (profile.proxyPort !== server.port) {
-    profile.proxyPort = server.port;
-    writeJson(PROFILES_FILE, data);
-    logger.debug(`profile proxy port persisted: ${profileName} -> ${server.port}`);
+  if (acquisition.isOwner) {
+    // The proxy was started by this process as a daemon. No local server object is needed,
+    // but we keep a placeholder so consumers can read baseUrl/port.
+    config.port = acquisition.port;
+  } else {
+    config.port = acquisition.port;
+    // Persist the reused port to the profile so future offline commands display it.
+    if (profile.proxyPort !== acquisition.port) {
+      profile.proxyPort = acquisition.port;
+      writeJson(PROFILES_FILE, data);
+      logger.debug(`profile proxy port persisted: ${profileName} -> ${acquisition.port}`);
+    }
   }
+
+  const server: ProxyServer = localServers.get(profileName) || {
+    baseUrl: acquisition.baseUrl,
+    port: acquisition.port,
+    stop: async () => {
+      const daemon = localDaemons.get(profileName);
+      if (daemon) {
+        await daemon.kill();
+        localDaemons.delete(profileName);
+      }
+    },
+  };
 
   const running: RunningProxy = {
     profileName,
@@ -59,23 +105,97 @@ export async function startProfileProxy(profileName: string): Promise<RunningPro
     config,
     startedAt: new Date(),
   };
-  runningProxies.set(profileName, running);
-  logger.info(`Started proxy for profile '${profileName}' on ${server.baseUrl}`);
-  return running;
+
+  return {
+    running,
+    release: () => {
+      proxyRegistry.releaseProxy(profileName, () => server.stop());
+    },
+  };
+}
+
+export function reserveProxyPort(profileName: string): number {
+  ensureProfilesFile();
+  const data = readJson<ProfilesData>(PROFILES_FILE);
+  const profile = data.profiles[profileName];
+  if (!profile) {
+    throw new Error(`Profile '${profileName}' not found.`);
+  }
+
+  const existingPort = profile.proxyPort;
+  if (existingPort) {
+    return existingPort;
+  }
+
+  throw new Error(
+    `Profile '${profileName}' has no reserved proxy port. Run 'codx run' first to allocate one.`,
+  );
+}
+
+export async function reserveProxyPortAsync(profileName: string): Promise<number> {
+  ensureProfilesFile();
+  const data = readJson<ProfilesData>(PROFILES_FILE);
+  const profile = data.profiles[profileName];
+  if (!profile) {
+    throw new Error(`Profile '${profileName}' not found.`);
+  }
+
+  const proxyConfig = readProxyConfig();
+  const existingPort = profile.proxyPort;
+
+  if (existingPort) {
+    // Quick check: if the port is free, reuse it. We bind and immediately release.
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const tester = require("node:net")
+          .createServer()
+          .once("error", () => reject(new Error("in use")))
+          .once("listening", () => {
+            tester.close(() => resolve());
+          })
+          .listen(existingPort, proxyConfig.listenAddress);
+      });
+      return existingPort;
+    } catch {
+      // fall through to allocate a new port
+    }
+  }
+
+  const port = await findAvailablePort(proxyConfig.listenAddress);
+  profile.proxyPort = port;
+  writeJson(PROFILES_FILE, data);
+  logger.debug(`reserved proxy port for profile '${profileName}': ${port}`);
+  return port;
 }
 
 export async function stopProfileProxy(profileName: string): Promise<void> {
-  const running = runningProxies.get(profileName);
-  if (!running) {
-    throw new Error(`Proxy for profile '${profileName}' is not running.`);
-  }
-  await running.server.stop();
-  runningProxies.delete(profileName);
-  logger.info(`Stopped proxy for profile '${profileName}'`);
+  proxyRegistry.releaseProxy(profileName, async () => {
+    const daemon = localDaemons.get(profileName);
+    if (daemon) {
+      await daemon.kill();
+      localDaemons.delete(profileName);
+    }
+    const server = localServers.get(profileName);
+    if (server) {
+      await server.stop();
+      localServers.delete(profileName);
+    }
+  });
 }
 
 export async function stopAllProxies(): Promise<void> {
-  await Promise.all(Array.from(runningProxies.keys()).map(stopProfileProxy));
+  proxyRegistry.stopAllOwnedProxies(async (entry) => {
+    const daemon = localDaemons.get(entry.profileName);
+    if (daemon) {
+      await daemon.kill();
+      localDaemons.delete(entry.profileName);
+    }
+    const server = localServers.get(entry.profileName);
+    if (server) {
+      await server.stop();
+      localServers.delete(entry.profileName);
+    }
+  });
 }
 
 export function buildProxyInstanceConfig(profileName: string, profile: Profile): ProxyInstanceConfig {
@@ -95,7 +215,7 @@ export function buildProxyInstanceConfig(profileName: string, profile: Profile):
 
   if (providers.length === 0) {
     throw new Error(
-      `Profile '${profileName}' has no valid provider. Set a provider on the profile with 'codex-hub profile add -p <provider>'.`,
+      `Profile '${profileName}' has no valid provider. Set a provider on the profile with 'codx profile add -p <provider>'.`,
     );
   }
 

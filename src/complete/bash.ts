@@ -1,4 +1,4 @@
-export const BASH_COMPLETION = `_codex-hub_profile_names() {
+export const BASH_COMPLETION = `_codx_profile_names() {
   local profiles_file="\${CODEX_PROFILES_FILE:-\$HOME/.codex/profiles.json}"
   if [[ -f "$profiles_file" ]]; then
     command python3 -c "
@@ -10,11 +10,11 @@ for name in data.get('profiles', {}):
   fi
 }
 
-_codex-hub_profiles() {
-  COMPREPLY=($(compgen -W "$(_codex-hub_profile_names)" -- "\${cur}"))
+_codx_profiles() {
+  COMPREPLY=($(compgen -W "$(_codx_profile_names)" -- "\${cur}"))
 }
 
-_codex-hub_models_for_profile() {
+_codx_models_for_profile() {
   local profile_name="$1"
   local profiles_file="\${CODEX_PROFILES_FILE:-\$HOME/.codex/profiles.json}"
   if [[ -f "$profiles_file" && -n "$profile_name" ]]; then
@@ -37,7 +37,7 @@ else:
   fi
 }
 
-_codex-hub() {
+_codx() {
   local cur prev commands
   COMPREPLY=()
   cur="\${COMP_WORDS[COMP_CWORD]}"
@@ -64,18 +64,18 @@ _codex-hub() {
       if [[ \${COMP_CWORD} -eq 2 ]]; then
         COMPREPLY=($(compgen -W "$profile_subcmds" -- "$cur"))
       elif [[ "$prev" == "view" || "$prev" == "remove" ]]; then
-        _codex-hub_profiles
+        _codx_profiles
       elif [[ "$prev" == "rename" ]]; then
-        _codex-hub_profiles
+        _codx_profiles
       elif [[ "$prev" == "profile" ]]; then
         COMPREPLY=($(compgen -W "$profile_subcmds" -- "$cur"))
       elif [[ "\${COMP_WORDS[2]}" == "update" && \${COMP_CWORD} -eq 3 ]]; then
-        _codex-hub_profiles
+        _codx_profiles
       elif [[ "\${COMP_WORDS[2]}" == "update" ]]; then
         if [[ "$prev" == "--provider" || "$prev" == "-p" ]]; then
           COMPREPLY=($(compgen -W "$provider_types" -- "$cur"))
         elif [[ "$prev" == "--model" || "$prev" == "-m" || "$prev" == "--delete-model" || "$prev" == "-d" ]]; then
-          _codex-hub_models_for_profile "\${COMP_WORDS[3]}"
+          _codx_models_for_profile "\${COMP_WORDS[3]}"
         else
           local update_opts="--model -m --delete-model -d --token -t --url -u --provider -p"
           COMPREPLY=($(compgen -W "$update_opts" -- "$cur"))
@@ -83,7 +83,7 @@ _codex-hub() {
       fi
       ;;
     use|run)
-      _codex-hub_profiles
+      _codx_profiles
       ;;
     hook)
       if [[ \${COMP_CWORD} -eq 2 ]]; then
@@ -124,5 +124,5 @@ _codex-hub() {
   return 0
 }
 
-complete -F _codex-hub codex-hub
+complete -F _codx codx
 `;

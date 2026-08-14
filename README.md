@@ -1,8 +1,8 @@
-# codex-hub
+# codx
 
 A lightweight CLI for managing [OpenAI Codex CLI](https://github.com/openai/codex) profiles, hooks, sessions, and provider proxies.
 
-codex-hub is shaped like [`cc-hub`](https://github.com/anthropics/claude-code-hub) but tailored for Codex CLI. Its provider proxy subsystem is inspired by [`cc-switch`](https://github.com/anthropics/cc-switch) and supports multiple concurrent provider proxies — one per profile — so you can run Kimi on one port and Qianwen on another at the same time.
+codx is shaped like [`cc-hub`](https://github.com/anthropics/claude-code-hub) but tailored for Codex CLI. Its provider proxy subsystem is inspired by [`cc-switch`](https://github.com/anthropics/cc-switch) and supports multiple concurrent provider proxies — one per profile — so you can run Kimi on one port and Qianwen on another at the same time.
 
 ## Features
 
@@ -11,13 +11,13 @@ codex-hub is shaped like [`cc-hub`](https://github.com/anthropics/claude-code-hu
 - **Provider adapters** — Kimi and Qianwen (DashScope) with OpenAI-compatible request/response transforms.
 - **Prompt cache routing** — injects `prompt_cache_key` for the OpenAI Responses API when enabled.
 - **Failover and circuit breakers** — automatic failover between providers with per-provider circuit breaker protection.
-- **Usage logging** — request/token logs written to `~/.codex/codex-hub/usage.jsonl`.
+- **Usage logging** — request/token logs written to `~/.codex/codx/usage.jsonl`.
 - **Shell completion** — bash/zsh/powershell completions (via Codex CLI style command).
 
 ## Install
 
 ```bash
-npm install -g codex-hub-cli
+npm install -g codx-cli
 ```
 
 Requires Node.js 18+.
@@ -26,17 +26,17 @@ Requires Node.js 18+.
 
 ```bash
 # Add a profile that routes to Kimi
-codex-hub profile add kimi-dev \
+codx profile add kimi-dev \
   --provider kimi \
   --model kimi-k2 \
   --token $KIMI_API_KEY \
   --proxy-port 15721
 
 # Start its dedicated proxy
-codex-hub proxy start kimi-dev
+codx proxy start kimi-dev
 
 # Launch Codex CLI through the proxy
-codex-hub run kimi-dev
+codx run kimi-dev
 ```
 
 ## Commands
@@ -44,12 +44,12 @@ codex-hub run kimi-dev
 ### Profiles
 
 ```bash
-codex-hub profile add <name> [options]
-codex-hub profile update <name> [options]
-codex-hub profile list
-codex-hub profile view <name>
-codex-hub profile remove <name>
-codex-hub profile rename <old> <new>
+codx profile add <name> [options]
+codx profile update <name> [options]
+codx profile list
+codx profile view <name>
+codx profile remove <name>
+codx profile rename <old> <new>
 ```
 
 Common profile options:
@@ -62,27 +62,27 @@ Common profile options:
 ### Providers
 
 ```bash
-codex-hub provider list
+codx provider list
 ```
 
 ### Run
 
 ```bash
 # Launch Codex CLI with the default profile
-codex-hub run
+codx run
 
 # Launch with a specific profile
-codex-hub run kimi-dev
+codx run kimi-dev
 
 # Forward extra flags to Codex CLI
-codex-hub run kimi-dev -- --approval-mode full-auto
+codx run kimi-dev -- --approval-mode full-auto
 ```
 
-When you run a profile, codex-hub automatically starts its provider proxy and points Codex CLI at `OPENAI_BASE_URL=<proxy url>`.
+When you run a profile, codx automatically starts its provider proxy and points Codex CLI at `OPENAI_BASE_URL=<proxy url>`.
 
 ## Provider configuration
 
-Provider presets are stored in `~/.codex/codex-hub/providers.json`. Built-in presets:
+Provider presets are stored in `~/.codex/codx/providers.json`. Built-in presets:
 
 - `kimi` — `https://api.kimi.com/coding` (model `kimi-k2-5-coding`)
 - `qianwen` — `https://dashscope.aliyuncs.com/compatible-mode/v1` (model `qwen-max`)

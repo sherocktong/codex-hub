@@ -7,7 +7,7 @@ import {
 } from "../config.js";
 import type { ProfilesData, Profile, ProviderType } from "../types.js";
 import { getProviderConfig, getDefaultProviderPresets, readProxyConfig } from "../proxy/config.js";
-import { stopAllProxies, getRunningProxy, startProfileProxy } from "../proxy/instance-manager.js";
+import { stopAllProxies, getRunningProxy, reserveProxyPortAsync } from "../proxy/instance-manager.js";
 import { execCodex } from "./runner.js";
 import { safeAction } from "../logger.js";
 import * as logger from "../logger.js";
@@ -117,14 +117,15 @@ export function profileCommand(): Command {
       writeJson(PROFILES_FILE, data);
       logger.debug(`profile add: wrote ${PROFILES_FILE}`);
 
-      // Start the profile proxy so the user gets a real allocated port immediately.
+      // Reserve a proxy port for the profile without starting a long-running server.
+      // profile add/update should not create a consumer that never unregisters.
       ensureProviderPresetsExist();
       let proxyUrl = resolveProfileProxyUrl(name);
       try {
-        const running = await startProfileProxy(name);
-        proxyUrl = running.server.baseUrl;
+        const reservedPort = await reserveProxyPortAsync(name);
+        proxyUrl = `http://${readProxyConfig().listenAddress}:${reservedPort}`;
       } catch (err) {
-        logger.warn(`Could not start proxy for profile '${name}'`, err);
+        logger.warn(`Could not reserve proxy port for profile '${name}'`, err);
       }
 
       console.log(`Profile '${name}' saved.`);
@@ -209,14 +210,15 @@ export function profileCommand(): Command {
       writeJson(PROFILES_FILE, data);
       logger.debug(`profile update: wrote ${PROFILES_FILE}`);
 
-      // Restart the profile proxy so any URL/provider changes take effect and the real port is shown.
+      // Reserve a proxy port for the profile without starting a long-running server.
+      // profile add/update should not create a consumer that never unregisters.
       ensureProviderPresetsExist();
       let proxyUrl = resolveProfileProxyUrl(name);
       try {
-        const running = await startProfileProxy(name);
-        proxyUrl = running.server.baseUrl;
+        const reservedPort = await reserveProxyPortAsync(name);
+        proxyUrl = `http://${readProxyConfig().listenAddress}:${reservedPort}`;
       } catch (err) {
-        logger.warn(`Could not start proxy for profile '${name}'`, err);
+        logger.warn(`Could not reserve proxy port for profile '${name}'`, err);
       }
 
       console.log(`Profile '${name}' updated.`);
@@ -383,7 +385,7 @@ export function runCommand(): Command {
       }
 
       if (!profileName) {
-        throw new Error("No default profile set. Use 'codex-hub use <name>' first.");
+        throw new Error("No default profile set. Use 'codx use <name>' first.");
       }
 
       const p = data.profiles[profileName];

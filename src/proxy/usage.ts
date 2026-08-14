@@ -4,7 +4,7 @@ import os from "node:os";
 import type { RequestContext, TokenUsage } from "./types.js";
 import { parseOpenAIUsage } from "./providers/index.js";
 
-const USAGE_LOG_DIR = path.join(os.homedir(), ".codex", "codex-hub");
+const USAGE_LOG_DIR = path.join(os.homedir(), ".codex", "codx");
 const USAGE_LOG_FILE = path.join(USAGE_LOG_DIR, "usage.jsonl");
 
 export interface UsageEntry {

@@ -61,7 +61,7 @@ export function codexVersionCommand(): Command {
     .description("Remove the Codex CLI version pin")
     .action(safeAction(() => {
       setPinnedVersion(undefined);
-      console.log("Version pin cleared. codex-hub will use the latest available Codex CLI version.");
+      console.log("Version pin cleared. codx will use the latest available Codex CLI version.");
     }));
 
   cmd
@@ -71,7 +71,7 @@ export function codexVersionCommand(): Command {
     .action(safeAction(async (version: string | undefined, opts: { clear?: boolean }) => {
       if (opts.clear || !version) {
         setPinnedVersion(undefined);
-        console.log("Version pin cleared. codex-hub will use the latest available Codex CLI version.");
+        console.log("Version pin cleared. codx will use the latest available Codex CLI version.");
         return;
       }
 

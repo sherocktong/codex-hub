@@ -399,11 +399,11 @@ export function sessionCommand(): Command {
       const promptText = `Please analyze this Codex CLI session file: ${match.filePath}\n\nThe file contains a JSONL conversation history. Review it for any errors, anomalies, or issues (truncated responses, failed tool calls, error messages, corrupted data, etc.). Summarize what happened in the session and identify any problems that need attention. If the file is very large, focus on the most recent turns and any lines containing "error", "exception", "failed", or non-JSON content.`;
       if (opts.interactive) {
         console.log("Launching Codex CLI (interactive)...");
-        logger.info(`session troubleshoot: launching codex-hub run (interactive) for ${match.filePath}`);
+        logger.info(`session troubleshoot: launching codx run (interactive) for ${match.filePath}`);
         args = ["run", promptText];
       } else {
         console.log("Launching Codex CLI with prompt...");
-        logger.info(`session troubleshoot: launching codex-hub run -p "${promptText}"`);
+        logger.info(`session troubleshoot: launching codx run -p "${promptText}"`);
         args = ["run", "-p", promptText];
       }
 

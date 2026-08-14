@@ -29,7 +29,7 @@ export async function fetchNpmVersions(): Promise<Array<{ version: string; date:
   const url = "https://registry.npmjs.org/@openai/codex";
   const response = await fetch(url, {
     headers: {
-      "User-Agent": `codex-hub/${__PKG_VERSION__ || "0.0.0"}`,
+      "User-Agent": `codx/${__PKG_VERSION__ || "0.0.0"}`,
     },
   });
 
