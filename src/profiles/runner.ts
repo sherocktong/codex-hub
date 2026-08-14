@@ -146,7 +146,10 @@ export async function execCodex(profileName: string, p: Profile, extraArgs: stri
   logger.debug(`Codex command: ${command.map((arg) => (arg.includes(" ") ? `"${arg}"` : arg)).join(" ")}`);
 
   const child = spawn(command[0], command.slice(1), {
-    stdio: "ignore",
+    // CLI launches should inherit stdio so the user can type prompts and pipe
+    // input. Desktop launches use "ignore" because the OS launcher detaches and
+    // we want the codx CLI to exit immediately.
+    stdio: isDesktopApp ? "ignore" : "inherit",
     env,
     shell: process.platform === "win32",
     detached: false,
