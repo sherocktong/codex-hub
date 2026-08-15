@@ -84,7 +84,7 @@ export function getDefaultProviderPresets(): Record<string, ProviderConfig> {
       name: "Kimi",
       baseUrl: "https://api.kimi.com/coding",
       apiKey: "",
-      models: ["kimi-k2-5-coding"],
+      models: ["kimi-k2-6", "kimi-k2-7", "kimi-k3", "kimi-k2-5-coding"],
       promptCacheRouting: "enabled",
       responsesToChatCompletions: true,
     },
@@ -94,7 +94,7 @@ export function getDefaultProviderPresets(): Record<string, ProviderConfig> {
       name: "Qianwen",
       baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
       apiKey: "",
-      models: ["qwen-max"],
+      models: ["qwen3.8-max-preview"],
       // Qianwen's OpenAI-compatible endpoint supports Anthropic-style
       // cache_control markers for explicit context caching on supported models.
       promptCacheRouting: "enabled",

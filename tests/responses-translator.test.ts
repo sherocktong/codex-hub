@@ -193,6 +193,29 @@ describe("responses-to-chat-completions translator", () => {
     expect((usage?.input_tokens_details as Record<string, unknown>)?.cached_tokens).toBe(5);
   });
 
+  it("pads an empty input array so upstream providers receive non-empty messages", () => {
+    const result = translateResponsesRequestToChat(
+      {
+        model: "kimi-k2.7",
+        input: [],
+      },
+      provider,
+    );
+    expect(result.upstreamPath).toBe("/v1/chat/completions");
+    expect(result.upstreamBody.messages).toEqual([{ role: "user", content: "​" }]);
+  });
+
+  it("pads a missing input field so upstream providers receive non-empty messages", () => {
+    const result = translateResponsesRequestToChat(
+      {
+        model: "kimi-k2.7",
+      },
+      provider,
+    );
+    expect(result.upstreamPath).toBe("/v1/chat/completions");
+    expect(result.upstreamBody.messages).toEqual([{ role: "user", content: "​" }]);
+  });
+
   it("converts Responses API tools to Chat Completions format", () => {
     const result = translateResponsesRequestToChat(
       {

@@ -19,7 +19,10 @@ export const kimiAdapter: ProviderAdapter = {
 
     let upstreamPath = ctx.path;
     let upstreamBody = body;
-    if (ctx.path === "/v1/responses" && shouldTranslateResponsesToChat(ctx.provider)) {
+    const translateResponses =
+      shouldTranslateResponsesToChat(ctx.provider) &&
+      (ctx.path === "/v1/responses" || ctx.path === "/v1/responses/compact");
+    if (translateResponses) {
       const translated = translateResponsesRequestToChat(body, ctx.provider);
       upstreamPath = translated.upstreamPath;
       upstreamBody = translated.upstreamBody;
@@ -45,7 +48,10 @@ export const kimiAdapter: ProviderAdapter = {
   },
 
   async transformResponse(ctx: RequestContext, response: Response): Promise<Response> {
-    if (ctx.path === "/v1/responses" && shouldTranslateResponsesToChat(ctx.provider)) {
+    const translateResponses =
+      shouldTranslateResponsesToChat(ctx.provider) &&
+      (ctx.path === "/v1/responses" || ctx.path === "/v1/responses/compact");
+    if (translateResponses) {
       const contentType = response.headers.get("content-type") || "";
       if (contentType.includes("application/json")) {
         const data = await response.json();
@@ -71,7 +77,10 @@ export const kimiAdapter: ProviderAdapter = {
   },
 
   transformStreamChunk(ctx: RequestContext, chunk: Record<string, unknown>): Record<string, unknown> | Record<string, unknown>[] {
-    if (ctx.path === "/v1/responses" && shouldTranslateResponsesToChat(ctx.provider)) {
+    const translateResponses =
+      shouldTranslateResponsesToChat(ctx.provider) &&
+      (ctx.path === "/v1/responses" || ctx.path === "/v1/responses/compact");
+    if (translateResponses) {
       return translateChatStreamChunkToResponses(ctx, chunk, ctx.body);
     }
 

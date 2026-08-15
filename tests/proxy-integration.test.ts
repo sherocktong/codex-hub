@@ -425,6 +425,159 @@ describe("proxy integration", () => {
     expect(text).not.toContain("this is not valid json");
   });
 
+  it("compacts /v1/responses/compact into a response.compaction object", async () => {
+    let capturedBody: Record<string, unknown> | undefined;
+    upstream = http.createServer((req, res) => {
+      let body = "";
+      req.on("data", (chunk) => (body += chunk));
+      req.on("end", () => {
+        capturedBody = JSON.parse(body);
+        expect(req.url).toBe("/v1/chat/completions");
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            id: "chatcmpl-compact",
+            object: "chat.completion",
+            model: "kimi-k2-5-coding",
+            choices: [{ message: { role: "assistant", content: "Summary of prior work" } }],
+            usage: { prompt_tokens: 10, completion_tokens: 4, total_tokens: 14 },
+          }),
+        );
+      });
+    });
+
+    const upstreamPort = await new Promise<number>((resolve) => {
+      upstream!.listen(0, "127.0.0.1", () => {
+        resolve((upstream!.address() as { port: number }).port);
+      });
+    });
+
+    const config: ProxyInstanceConfig = {
+      profileName: "test",
+      port: 0,
+      listenAddress: "127.0.0.1",
+      providers: [
+        {
+          id: "kimi",
+          type: "kimi",
+          name: "Kimi",
+          baseUrl: `http://127.0.0.1:${upstreamPort}`,
+          apiKey: "test-key",
+          models: ["kimi-k2-5-coding"],
+          responsesToChatCompletions: true,
+        },
+      ],
+      requestTimeout: 5000,
+      maxRetries: 0,
+      streamingFirstByteTimeout: 5000,
+      streamingIdleTimeout: 5000,
+      nonStreamingTimeout: 5000,
+    };
+
+    proxyServer = await startProxyServer(config.port, config.listenAddress, createRequestHandler(config));
+
+    const response = await fetch(`${proxyServer.baseUrl}/v1/responses/compact`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: "Bearer client" },
+      body: JSON.stringify({
+        model: "kimi-k2.7",
+        input: [
+          { type: "message", role: "user", content: [{ type: "input_text", text: "Plan a trip." }] },
+          { type: "message", role: "assistant", content: [{ type: "output_text", text: "Sure, where?" }] },
+        ],
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(capturedBody).toBeDefined();
+    expect(capturedBody!.stream).toBe(false);
+    const messages = capturedBody!.messages as Array<Record<string, unknown>>;
+    expect(messages[0].role).toBe("system");
+    expect(messages[messages.length - 1].content).toContain("Produce the context checkpoint compaction summary");
+
+    const json = await response.json();
+    expect(json.object).toBe("response.compaction");
+    expect(json.output).toHaveLength(1);
+    expect(json.output[0].type).toBe("compaction");
+    expect(json.output[0].encrypted_content).toBe("Summary of prior work");
+    expect(json.usage.input_tokens).toBe(10);
+    expect(json.usage.output_tokens).toBe(4);
+  });
+
+  it("translates compaction items in /v1/responses input back into messages", async () => {
+    let capturedBody: Record<string, unknown> | undefined;
+    upstream = http.createServer((req, res) => {
+      let body = "";
+      req.on("data", (chunk) => (body += chunk));
+      req.on("end", () => {
+        capturedBody = JSON.parse(body);
+        expect(req.url).toBe("/v1/chat/completions");
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            id: "chatcmpl-resume",
+            object: "chat.completion",
+            model: "kimi-k2-5-coding",
+            choices: [{ message: { role: "assistant", content: "Continuing from checkpoint" } }],
+            usage: { prompt_tokens: 5, completion_tokens: 3, total_tokens: 8 },
+          }),
+        );
+      });
+    });
+
+    const upstreamPort = await new Promise<number>((resolve) => {
+      upstream!.listen(0, "127.0.0.1", () => {
+        resolve((upstream!.address() as { port: number }).port);
+      });
+    });
+
+    const config: ProxyInstanceConfig = {
+      profileName: "test",
+      port: 0,
+      listenAddress: "127.0.0.1",
+      providers: [
+        {
+          id: "kimi",
+          type: "kimi",
+          name: "Kimi",
+          baseUrl: `http://127.0.0.1:${upstreamPort}`,
+          apiKey: "test-key",
+          models: ["kimi-k2-5-coding"],
+          responsesToChatCompletions: true,
+        },
+      ],
+      requestTimeout: 5000,
+      maxRetries: 0,
+      streamingFirstByteTimeout: 5000,
+      streamingIdleTimeout: 5000,
+      nonStreamingTimeout: 5000,
+    };
+
+    proxyServer = await startProxyServer(config.port, config.listenAddress, createRequestHandler(config));
+
+    const response = await fetch(`${proxyServer.baseUrl}/v1/responses`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: "Bearer client" },
+      body: JSON.stringify({
+        model: "kimi-k2.7",
+        input: [
+          { type: "compaction", encrypted_content: "Prior summary" },
+          { type: "message", role: "user", content: [{ type: "input_text", text: "Continue." }] },
+        ],
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(capturedBody).toBeDefined();
+    const messages = capturedBody!.messages as Array<Record<string, unknown>>;
+    expect(messages[0].role).toBe("user");
+    expect(messages[0].content).toContain("Prior summary");
+    expect(messages[1].role).toBe("user");
+
+    const json = await response.json();
+    expect(json.output[0].content[0].text).toBe("Continuing from checkpoint");
+  });
+
   it("returns models from the configured providers", async () => {
     const config: ProxyInstanceConfig = {
       profileName: "test",

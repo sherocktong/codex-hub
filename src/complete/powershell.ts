@@ -9,7 +9,6 @@ export const POWERSHELL_COMPLETION = `Register-ArgumentCompleter -Native -Comman
     'provider:List configured providers'
     'hook:Manage Codex CLI hooks in settings.json'
     'session:Manage Codex CLI sessions'
-    'cache:Manage Codex CLI cache and backup files'
     'codex-version:Manage Codex CLI versions'
     'completion:Print shell completion functions'
     'help:Display help for a command'
@@ -18,7 +17,6 @@ export const POWERSHELL_COMPLETION = `Register-ArgumentCompleter -Native -Comman
   $profileSubcmds = @('add', 'update', 'list', 'view', 'remove', 'rename', 'default')
   $hookSubcmds = @('list', 'add', 'remove', 'enable', 'disable')
   $sessionSubcmds = @('list', 'show', 'search', 'ps', 'stats', 'clean', 'troubleshoot')
-  $cacheSubcmds = @('restore')
   $codexVersionSubcmds = @('list', 'pin', 'unpin')
 
   $tokens = $commandAst.CommandElements | ForEach-Object { $_.ToString() }
@@ -49,12 +47,6 @@ export const POWERSHELL_COMPLETION = `Register-ArgumentCompleter -Native -Comman
     'session' {
       if ($tokens.Count -eq 2 -or ($tokens.Count -eq 3 -and $wordToComplete -ne '')) {
         $sessionSubcmds | ForEach-Object { if ($_ -like "$wordToComplete*") { $_ } }
-        return
-      }
-    }
-    'cache' {
-      if ($tokens.Count -eq 2 -or ($tokens.Count -eq 3 -and $wordToComplete -ne '')) {
-        $cacheSubcmds | ForEach-Object { if ($_ -like "$wordToComplete*") { $_ } }
         return
       }
     }

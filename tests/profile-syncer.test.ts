@@ -37,13 +37,16 @@ describe("profile-syncer", () => {
     expect(profileSyncer.escapeTomlString("c:\\path\\to\\file")).toBe("c:\\\\path\\\\to\\\\file");
   });
 
-  it("generateDefaultBaseConfig contains mcp_servers and features", () => {
+  it("generateDefaultBaseConfig contains mcp_servers, features, and context limits", () => {
     const content = profileSyncer.generateDefaultBaseConfig();
     expect(content).toContain("[mcp_servers.node_repl]");
     expect(content).toContain("[mcp_servers.computer-use]");
     expect(content).toContain("[features]");
     expect(content).toContain("[marketplaces.openai-bundled]");
     expect(content).toContain('theme = "Catppuccin Latte"');
+    expect(content).toContain("model_context_window = 258400");
+    expect(content).toContain("model_auto_compact_token_limit = 230000");
+    expect(content).toContain("remote_compaction_v2 = false");
   });
 
   it("builds full profile content with proxy keys at the top", () => {

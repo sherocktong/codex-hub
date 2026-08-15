@@ -26,7 +26,15 @@ export function translateResponsesRequestToChat(
   delete upstreamBody.input;
 
   const input = body.input as Array<Record<string, unknown>> | undefined;
-  upstreamBody.messages = input ? input.map(translateInputItem) : [];
+  upstreamBody.messages = Array.isArray(input) ? input.map(translateInputItem) : [];
+
+  // Providers such as Kimi reject chat-completion requests whose messages array
+  // is empty ("messages must not be empty"). Codex occasionally sends an empty
+  // input array (e.g. during startup probes), so pad with a harmless placeholder
+  // message to keep the connection healthy instead of aborting the WebSocket.
+  if ((upstreamBody.messages as Array<Record<string, unknown>>).length === 0) {
+    upstreamBody.messages = [{ role: "user", content: "​" }];
+  }
 
   // Copy common params that are shared between the two APIs.
   for (const key of ["model", "stream", "temperature", "top_p", "max_tokens", "stop"]) {
@@ -54,6 +62,15 @@ export function translateResponsesRequestToChat(
 }
 
 function translateInputItem(item: Record<string, unknown>): Record<string, unknown> {
+  // A compaction item carries an opaque summary blob produced by a previous
+  // /v1/responses/compact call. Present it to the Chat Completions model as a
+  // user message so the conversation can continue from the checkpoint.
+  if (item.type === "compaction") {
+    const encrypted = item.encrypted_content;
+    const summary = typeof encrypted === "string" ? encrypted : JSON.stringify(item);
+    return { role: "user", content: `[context checkpoint]\n${summary}` };
+  }
+
   let role = typeof item.role === "string" ? item.role : "user";
   // OpenAI's Responses API uses 'developer' for system instructions; Kimi/Qianwen only accept 'system'.
   if (role === "developer") role = "system";
@@ -201,7 +218,7 @@ export function translateChatResponseToResponses(
   };
 }
 
-function translateUsage(usage: Record<string, unknown> | undefined): Record<string, unknown> {
+export function translateUsage(usage: Record<string, unknown> | undefined): Record<string, unknown> {
   if (!usage) {
     return {
       input_tokens: 0,

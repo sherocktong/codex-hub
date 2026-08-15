@@ -37,7 +37,6 @@ program.addCommand(hooksCommand());
 program.addCommand(sessionCommand());
 program.addCommand(completionCommand());
 program.addCommand(providerListCommand());
-program.addCommand(cacheCommand());
 program.addCommand(codexVersionCommand());
 program.addCommand(proxyServerCommand());
 

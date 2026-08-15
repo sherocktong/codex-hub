@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
+import http from "node:http";
 import WebSocket from "ws";
 
 const TEST_DIR = path.join(os.tmpdir(), `codx-websocket-test-${process.pid}`);
@@ -74,5 +75,69 @@ describe("websocket proxy", () => {
 
     await opened;
     ws.close();
+  });
+
+  it("emits a response.failed event when upstream returns an error", async () => {
+    await server.stop();
+
+    const upstream = http.createServer((req, res) => {
+      let body = "";
+      req.on("data", (chunk) => (body += chunk));
+      req.on("end", () => {
+        const parsed = JSON.parse(body);
+        expect(parsed.messages).toEqual([{ role: "user", content: "​" }]);
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: { message: "bad request", type: "invalid_request_error" } }));
+      });
+    });
+
+    const upstreamPort = await new Promise<number>((resolve) => {
+      upstream.listen(0, "127.0.0.1", () => {
+        resolve((upstream.address() as { port: number }).port);
+      });
+    });
+
+    const handler = createRequestHandler({
+      profileName: "test",
+      port: 0,
+      listenAddress: "127.0.0.1",
+      providers: [{
+        id: "kimi",
+        type: "kimi",
+        name: "Kimi",
+        baseUrl: `http://127.0.0.1:${upstreamPort}`,
+        apiKey: "",
+        models: ["kimi-k2.7"],
+        responsesToChatCompletions: true,
+      }],
+      requestTimeout: 5000,
+      maxRetries: 0,
+      streamingFirstByteTimeout: 5000,
+      streamingIdleTimeout: 5000,
+      nonStreamingTimeout: 5000,
+    });
+
+    server = await startProxyServer(0, "127.0.0.1", handler);
+
+    const ws = new WebSocket(`ws://${server.baseUrl.replace("http://", "")}/v1/responses`);
+
+    const messages: WebSocket.RawData[] = [];
+    const closed = new Promise<void>((resolve) => {
+      ws.on("close", resolve);
+    });
+
+    ws.on("message", (data) => messages.push(data));
+    ws.on("open", () => {
+      ws.send(JSON.stringify({ model: "kimi-k2.7", input: [] }));
+    });
+
+    await closed;
+    upstream.close();
+
+    expect(messages.length).toBeGreaterThan(0);
+    const lastMessage = JSON.parse(messages[messages.length - 1].toString("utf-8"));
+    expect(lastMessage.type).toBe("response.failed");
+    expect(lastMessage.response.error.type).toBe("proxy_error");
+    expect(lastMessage.response.error.message).toContain("All providers failed");
   });
 });

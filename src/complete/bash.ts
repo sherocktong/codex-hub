@@ -42,13 +42,12 @@ _codx() {
   COMPREPLY=()
   cur="\${COMP_WORDS[COMP_CWORD]}"
   prev="\${COMP_WORDS[COMP_CWORD-1]}"
-  commands="profile use run unproxy provider hook session cache codex-version completion help"
+  commands="profile use run unproxy provider hook session codex-version completion help"
 
   local profile_subcmds="add update list view remove rename"
   local provider_types="kimi qianwen"
   local hooks_subcmds="list add remove enable disable"
   local session_subcmds="list show search ps stats clean troubleshoot"
-  local cache_subcmds="restore"
   local codex_version_subcmds="list pin unpin"
 
   # Top-level command
@@ -88,11 +87,6 @@ _codx() {
     hook)
       if [[ \${COMP_CWORD} -eq 2 ]]; then
         COMPREPLY=($(compgen -W "$hooks_subcmds" -- "$cur"))
-      fi
-      ;;
-    cache)
-      if [[ \${COMP_CWORD} -eq 2 ]]; then
-        COMPREPLY=($(compgen -W "$cache_subcmds" -- "$cur"))
       fi
       ;;
     session)
