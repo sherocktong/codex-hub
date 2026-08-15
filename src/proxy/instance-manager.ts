@@ -79,12 +79,8 @@ export async function acquireProfileProxy(profileName: string): Promise<Acquired
     config.port = acquisition.port;
   } else {
     config.port = acquisition.port;
-    // Persist the reused port to the profile so future offline commands display it.
-    if (profile.proxyPort !== acquisition.port) {
-      profile.proxyPort = acquisition.port;
-      writeJson(PROFILES_FILE, data);
-      logger.debug(`profile proxy port persisted: ${profileName} -> ${acquisition.port}`);
-    }
+    // The port is owned by the daemon and sourced from profiles.json; do not persist it back
+    // here to avoid floating ports when multiple consumers race to update the file.
   }
 
   const server: ProxyServer = localServers.get(profileName) || {

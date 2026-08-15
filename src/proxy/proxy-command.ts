@@ -1,8 +1,7 @@
 import { Command } from "commander";
-import net from "node:net";
-import { PROFILES_FILE, ensureProfilesFile, readJson, writeJson } from "../config.js";
+import { PROFILES_FILE, ensureProfilesFile, readJson } from "../config.js";
 import type { ProfilesData } from "../types.js";
-import { startProxyServer, findAvailablePort } from "./server.js";
+import { startProxyServer } from "./server.js";
 import { createRequestHandler } from "./handlers.js";
 import { buildProxyInstanceConfig, ensureProviderPresetsExist } from "./instance-manager.js";
 import {
@@ -36,34 +35,10 @@ export function proxyServerCommand(): Command {
 
         const requestHandler = createRequestHandler(config);
 
-        // If a persisted port is in use (e.g. stale daemon or another process), fall back to a
-        // fresh available port instead of crashing with EADDRINUSE.
-        let startPort = config.port;
-        if (startPort !== 0) {
-          const available = await new Promise<boolean>((resolve) => {
-            const tester = net
-              .createServer()
-              .once("error", () => resolve(false))
-              .once("listening", () => {
-                tester.close(() => resolve(true));
-              })
-              .listen(startPort, config.listenAddress);
-          });
-          if (!available) {
-            logger.warn(`Configured proxy port ${startPort} is in use; picking a new port`);
-            startPort = await findAvailablePort(config.listenAddress);
-          }
-        }
-
-        const server = await startProxyServer(startPort, config.listenAddress, requestHandler);
-
-        // Persist the actual bound port so consumers can reconnect after owner restarts.
-        if (profile.proxyPort !== server.port) {
-          const fresh = readJson<ProfilesData>(PROFILES_FILE);
-          fresh.profiles[profileName] = { ...profile, proxyPort: server.port };
-          writeJson(PROFILES_FILE, fresh);
-          logger.debug(`proxy daemon persisted port: ${profileName} -> ${server.port}`);
-        }
+        // Use the configured port exactly. If it is in use, fail loudly so the
+        // user can resolve the conflict rather than silently floating to a new
+        // port and leaving config files stale.
+        const server = await startProxyServer(config.port, config.listenAddress, requestHandler);
 
         console.log(`PROXY_READY port=${server.port}`);
         logger.info(`Proxy daemon for '${profileName}' listening on ${server.baseUrl}`);
