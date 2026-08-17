@@ -287,7 +287,8 @@ export function removeProfileAction(name: string): void {
   writeJson(PROFILES_FILE, data);
   logger.debug(`profile remove: wrote ${PROFILES_FILE}`);
 
-  // If config.toml is symlinked to the profile being removed, remove the symlink.
+  // The base config.toml is preserved when removing a profile so user
+  // settings and project trust levels are not lost.
   deactivateProfileConfig(name);
 
   removeNativeProfile(name);

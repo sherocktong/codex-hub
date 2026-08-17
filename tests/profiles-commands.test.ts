@@ -113,7 +113,7 @@ describe("profiles commands", () => {
     expect(profileSyncer.removeNativeProfile).toHaveBeenCalledWith("kimi-dev");
   });
 
-  it("removeProfileAction removes the active config.toml copy", () => {
+  it("removeProfileAction preserves base config.toml", () => {
     ensureProfilesFile();
     const initial: ProfilesData = {
       profiles: {
@@ -130,11 +130,12 @@ describe("profiles commands", () => {
     const profilePath = profileSyncer.getNativeProfilePath("kimi-dev");
     fs.mkdirSync(path.dirname(configPath), { recursive: true });
     fs.writeFileSync(profilePath, "profile", "utf-8");
-    fs.writeFileSync(configPath, "profile", "utf-8");
+    fs.writeFileSync(configPath, "user base config", "utf-8");
 
     removeProfileAction("kimi-dev");
 
-    expect(fs.existsSync(configPath)).toBe(false);
+    expect(fs.existsSync(configPath)).toBe(true);
+    expect(fs.readFileSync(configPath, "utf-8")).toBe("user base config");
   });
 
   it("renameProfileAction renames profile, removes old native, and syncs new native", async () => {

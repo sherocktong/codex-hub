@@ -111,6 +111,44 @@ export function generateNativeProfileContent(
   return lines.join("\n") + "\n";
 }
 
+const FEATURES_TABLE = "[features]";
+const REMOTE_COMPACTION_V2_KEY = "remote_compaction_v2";
+
+/**
+ * Ensure the generated profile disables the Responses-API-only remote compaction
+ * v2 protocol. Chat-Completions providers (Kimi/Qianwen) cannot produce the
+ * required compaction output item, so Codex must fall back to the older
+ * /responses/compact path or local compaction.
+ */
+function ensureRemoteCompactionV2Disabled(content: string): string {
+  // If the key already exists, force it to false. Chat-Completions-only
+  // providers cannot satisfy the v2 protocol.
+  const keyRegex = new RegExp(
+    `^(\\s*)${REMOTE_COMPACTION_V2_KEY}\\s*=\\s*(.*)$`,
+    "m",
+  );
+  if (keyRegex.test(content)) {
+    return content.replace(
+      keyRegex,
+      `$1${REMOTE_COMPACTION_V2_KEY} = false`,
+    );
+  }
+
+  const featuresMatch = content.match(/^\s*\[features\]\s*$/m);
+  if (featuresMatch) {
+    const insertPos = featuresMatch.index! + featuresMatch[0].length;
+    return (
+      content.slice(0, insertPos) +
+      `\n${REMOTE_COMPACTION_V2_KEY} = false` +
+      content.slice(insertPos)
+    );
+  }
+
+  const trimmed = content.trimEnd();
+  const separator = trimmed.length > 0 ? "\n\n" : "";
+  return `${trimmed}${separator}[features]\n${REMOTE_COMPACTION_V2_KEY} = false\n`;
+}
+
 /**
  * Build a full profile config by taking a base TOML string and injecting the
  * codex-hub proxy settings at the top. Because we rewrite the whole text,
@@ -139,7 +177,12 @@ export function buildFullProfileContent(
 
   // Strip any existing generated profile content from the base content so we
   // do not accumulate duplicate headers or keys when re-syncing a profile.
-  const stripped = stripGeneratedProfileContent(baseContent);
+  let stripped = stripGeneratedProfileContent(baseContent);
+
+  // Chat-Completions providers must have remote_compaction_v2 disabled.
+  if (profile.provider === "kimi" || profile.provider === "qianwen") {
+    stripped = ensureRemoteCompactionV2Disabled(stripped);
+  }
 
   return `${profileHeader}\n${profileKeys.join("\n")}\n\n${stripped}`.trim() + "\n";
 }
@@ -208,6 +251,116 @@ export function stripGeneratedProfileContent(content: string): string {
     .trim();
 }
 
+/**
+ * Remove only the codex-hub generated comment headers from a TOML string.
+ * This keeps the generated key-value pairs so they can be merged into the
+ * base config.toml without carrying over the generated comments.
+ */
+function stripGeneratedProfileComments(content: string): string {
+  return content
+    .split("\n")
+    .filter((line) => !isGeneratedComment(line))
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+interface TomlSection {
+  /** Empty string for the top-level section, otherwise the table header. */
+  header: string;
+  /** Raw lines belonging to the section, including the header for tables. */
+  lines: string[];
+  /** Map of key name to the index of its line within `lines`. */
+  keyLines: Map<string, number>;
+}
+
+function parseTomlSections(content: string): TomlSection[] {
+  const sections: TomlSection[] = [];
+  let current: TomlSection = { header: "", lines: [], keyLines: new Map() };
+
+  for (const rawLine of content.split("\n")) {
+    if (isTomlTableHeader(rawLine)) {
+      sections.push(current);
+      current = { header: rawLine.trim(), lines: [rawLine], keyLines: new Map() };
+    } else {
+      current.lines.push(rawLine);
+      const trimmed = rawLine.trim();
+      if (trimmed && !trimmed.startsWith("#")) {
+        const match = trimmed.match(/^(\S+)\s*=\s*(.*)$/);
+        if (match) {
+          current.keyLines.set(match[1], current.lines.length - 1);
+        }
+      }
+    }
+  }
+  sections.push(current);
+  return sections;
+}
+
+function mergeTomlSections(
+  baseSections: TomlSection[],
+  profileSections: TomlSection[],
+): TomlSection[] {
+  const result: TomlSection[] = baseSections.map((section) => ({
+    header: section.header,
+    lines: [...section.lines],
+    keyLines: new Map(section.keyLines),
+  }));
+  const indexByHeader = new Map(
+    result.map((section, index) => [section.header, index]),
+  );
+
+  for (const profileSection of profileSections) {
+    const baseIndex = indexByHeader.get(profileSection.header);
+    if (baseIndex === undefined) {
+      result.push({
+        header: profileSection.header,
+        lines: [...profileSection.lines],
+        keyLines: new Map(profileSection.keyLines),
+      });
+      indexByHeader.set(profileSection.header, result.length - 1);
+    } else {
+      const baseSection = result[baseIndex];
+      for (const [key, lineIndex] of profileSection.keyLines) {
+        if (baseSection.keyLines.has(key)) {
+          const baseLineIndex = baseSection.keyLines.get(key)!;
+          baseSection.lines[baseLineIndex] = profileSection.lines[lineIndex];
+        } else {
+          baseSection.lines.push(profileSection.lines[lineIndex]);
+          baseSection.keyLines.set(key, baseSection.lines.length - 1);
+        }
+      }
+    }
+  }
+
+  return result;
+}
+
+function serializeTomlSections(sections: TomlSection[]): string {
+  return (
+    sections
+      .map((section) => section.lines.join("\n"))
+      .join("\n")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim() + "\n"
+  );
+}
+
+/**
+ * Merge profile TOML content into base TOML content. Entries that exist in
+ * both are overwritten with the profile value; entries present only in the
+ * base are preserved; entries present only in the profile are appended.
+ */
+export function mergeTomlContents(
+  baseContent: string,
+  profileContent: string,
+): string {
+  const baseSections = parseTomlSections(baseContent);
+  const profileSections = parseTomlSections(profileContent);
+  const merged = mergeTomlSections(baseSections, profileSections);
+  return serializeTomlSections(merged);
+}
+
 export async function syncNativeProfile(
   name: string,
   profile: Profile,
@@ -253,61 +406,48 @@ export function removeNativeProfile(name: string): void {
 }
 
 /**
- * Activate a profile for the desktop app by writing the profile content
- * directly into ~/.codex/config.toml. The desktop app replaces symlinks with
- * regular files when it saves settings, so we treat config.toml as a writable
- * copy of the active profile. The per-profile file remains the canonical source
- * and is regenerated first to ensure it is up to date.
+ * Activate a profile for the desktop app by merging the profile content
+ * into ~/.codex/config.toml. The desktop app replaces symlinks with regular
+ * files when it saves settings, so we treat config.toml as a writable base
+ * config. The per-profile file remains the canonical source and is
+ * regenerated first to ensure it is up to date.
  */
-export function activateProfileConfig(name: string, profile: Profile, proxyBaseUrl: string): void {
+export function activateProfileConfig(
+  name: string,
+  profile: Profile,
+  proxyBaseUrl: string,
+): void {
   syncNativeProfile(name, profile, proxyBaseUrl);
 
   const profilePath = getNativeProfilePath(name);
   const configPath = CODEX_CONFIG_FILE;
 
-  // Write config.toml as a copy of the profile file. If config.toml is currently
-  // a symlink, replace it with a regular file so the desktop app can rewrite it
-  // without breaking profile switching on future launches.
-  if (fs.existsSync(configPath) && fs.lstatSync(configPath).isSymbolicLink()) {
-    fs.unlinkSync(configPath);
+  // Populate base config.toml from the profile file without deleting it.
+  // Profile values overwrite duplicate entries; base-only entries are kept.
+  const profileContent = fs.readFileSync(profilePath, "utf-8");
+  let baseContent = generateDefaultBaseConfig();
+  if (fs.existsSync(configPath)) {
+    baseContent = fs.readFileSync(configPath, "utf-8");
+    // If config.toml is currently a symlink, replace it with a regular file so
+    // the desktop app can rewrite it without breaking profile switching.
+    if (fs.lstatSync(configPath).isSymbolicLink()) {
+      fs.unlinkSync(configPath);
+    }
   }
-
-  const content = fs.readFileSync(profilePath, "utf-8");
-  fs.writeFileSync(configPath, content, "utf-8");
-  logger.debug(`activated profile '${name}': wrote ${configPath} from ${profilePath}`);
+  const strippedProfile = stripGeneratedProfileComments(profileContent);
+  const merged = mergeTomlContents(baseContent, strippedProfile);
+  fs.writeFileSync(configPath, merged, "utf-8");
+  logger.debug(
+    `activated profile '${name}': merged ${profilePath} into ${configPath}`,
+  );
 }
 
 /**
- * Remove the active config.toml copy if it matches the given profile. This does
- * not delete a user-created base config.toml that was not written by codex-hub.
+ * Deactivate a profile. The base config.toml is intentionally preserved so
+ * that user settings and project trust levels are not lost.
  */
 export function deactivateProfileConfig(name: string): void {
-  const profilePath = getNativeProfilePath(name);
-  const configPath = CODEX_CONFIG_FILE;
-
-  if (!fs.existsSync(configPath)) {
-    return;
-  }
-
-  // Only remove config.toml if it is a regular file with the same content as
-  // the profile we are deactivating. If it is a symlink or has been edited by
-  // the user/desktop app, leave it alone.
-  if (fs.lstatSync(configPath).isSymbolicLink()) {
-    return;
-  }
-
-  try {
-    const current = fs.readFileSync(configPath, "utf-8");
-    const profile = fs.readFileSync(profilePath, "utf-8");
-    if (current === profile) {
-      fs.unlinkSync(configPath);
-      logger.debug(`deactivated profile '${name}': removed ${configPath}`);
-    }
-  } catch (err: any) {
-    if (err?.code !== "ENOENT") {
-      logger.warn(`failed to deactivate profile '${name}'`, err);
-    }
-  }
+  logger.debug(`deactivated profile '${name}': preserved base config.toml`);
 }
 
 export function isValidProfileName(name: string): boolean {
