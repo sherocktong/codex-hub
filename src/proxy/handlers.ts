@@ -1,6 +1,7 @@
 import http from "node:http";
+import net from "node:net";
 import { WebSocketServer, WebSocket } from "ws";
-import { readBody, sendJson, sendError } from "./server.js";
+import { readBody, sendJson, sendError, type RequestHandlerWithUpgrade } from "./server.js";
 import { createForwarder } from "./forwarder.js";
 import * as logger from "../logger.js";
 import type { ProxyInstanceConfig, ProviderAdapter, RequestContext } from "./types.js";
@@ -9,11 +10,11 @@ import { translateResponsesRequestToChat, translateUsage } from "./responses-tra
 import { getAdapter } from "./providers/index.js";
 import { logRequest } from "./usage.js";
 
-export function createRequestHandler(config: ProxyInstanceConfig) {
+export function createRequestHandler(config: ProxyInstanceConfig): RequestHandlerWithUpgrade {
   const forwarder = createForwarder(config.profileName, config.providers[0]);
   const wss = new WebSocketServer({ noServer: true });
 
-  return async (req: http.IncomingMessage, res: http.ServerResponse): Promise<void> => {
+  const requestHandler = async (req: http.IncomingMessage, res: http.ServerResponse): Promise<void> => {
     const url = req.url || "/";
     const method = req.method || "GET";
 
@@ -44,14 +45,6 @@ export function createRequestHandler(config: ProxyInstanceConfig) {
         object: "list",
         data: Array.from(models).map((id) => ({ id, object: "model" })),
       });
-      return;
-    }
-
-    if (
-      req.headers.upgrade === "websocket" &&
-      (url === "/v1/responses" || url === "/v1/chat/completions")
-    ) {
-      handleWebSocketUpgrade(wss, req, config, forwarder);
       return;
     }
 
@@ -120,6 +113,19 @@ export function createRequestHandler(config: ProxyInstanceConfig) {
 
     sendError(res, 404, "endpoint not found", "not_found");
   };
+
+  requestHandler.handleUpgrade = (req: http.IncomingMessage, socket: net.Socket, head: Buffer) => {
+    const url = req.url || "/";
+    if (url !== "/v1/responses" && url !== "/v1/chat/completions") {
+      socket.destroy();
+      return;
+    }
+    wss.handleUpgrade(req, socket, head, (ws) => {
+      handleWebSocketConnection(ws, req, config, forwarder);
+    });
+  };
+
+  return requestHandler;
 }
 
 const COMPACT_SYSTEM_PROMPT = `You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary for another LLM that will resume the task.
@@ -260,83 +266,107 @@ function generateId(): string {
   return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
 }
 
-function handleWebSocketUpgrade(
-  wss: WebSocketServer,
+function handleWebSocketConnection(
+  ws: WebSocket,
   req: http.IncomingMessage,
   config: ProxyInstanceConfig,
   forwarder: ReturnType<typeof createForwarder>,
 ): void {
-  wss.handleUpgrade(req, req.socket, Buffer.alloc(0), async (ws) => {
-    const url = req.url || "/";
-    const method = "POST";
+  const url = req.url || "/";
+  const method = "POST";
+  let activeReader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+  let messageQueue = Promise.resolve();
 
-    ws.once("message", async (data) => {
-      let body: Record<string, unknown>;
-      try {
-        body = JSON.parse(data.toString("utf-8")) as Record<string, unknown>;
-      } catch {
-        await sendWsError(ws, 400, "invalid JSON", "invalid_request_error");
-        ws.close();
-        return;
-      }
+  const cancelActiveReader = () => {
+    if (activeReader) {
+      activeReader.cancel().catch(() => {});
+      activeReader = undefined;
+    }
+  };
 
-      const headers = new Headers();
-      for (const [key, value] of Object.entries(req.headers)) {
-        if (key.toLowerCase() === "upgrade" || key.toLowerCase() === "connection") continue;
-        if (value === undefined) continue;
-        if (Array.isArray(value)) {
-          for (const v of value) headers.append(key, v);
-        } else {
-          headers.set(key, value);
-        }
-      }
-      headers.set("Content-Type", "application/json");
+  ws.on("close", cancelActiveReader);
+  ws.on("error", (err) => {
+    logger.error("WebSocket error", err);
+    cancelActiveReader();
+  });
 
-      const sessionId = req.headers["x-codex-session-id"] as string | undefined;
-
-      try {
-        const { response, provider, ctx } = await forwarder.forward(
-          new Request(`http://${req.headers.host}${url}`, {
-            method,
-            headers,
-            body: JSON.stringify(body),
-          }),
-          body,
-          url,
-          method,
-          headers,
-          sessionId,
-        );
-
-        const adapter = getAdapter(provider);
-
-        if (body.stream && response.body) {
-          await logRequest(ctx, response);
-          await pipeWebSocketStream(ws, response.body, adapter, ctx);
-        } else {
-          await logRequest(ctx, response);
-          const resBody = await response.arrayBuffer();
-          await new Promise<void>((resolve, reject) => {
-            ws.send(Buffer.from(resBody), (err) => {
-              if (err) reject(err);
-              else resolve();
-            });
-          });
-        }
-
-        ws.close();
-      } catch (err) {
-        logger.error("Proxy WebSocket forwarding error", err);
-        const message = err instanceof Error ? err.message : String(err);
-        await sendWsError(ws, 502, message, "proxy_error");
-        ws.close();
-      }
-    });
-
-    ws.on("error", (err) => {
-      logger.error("WebSocket error", err);
+  ws.on("message", (data) => {
+    messageQueue = messageQueue.then(() => processWebSocketMessage(data));
+    messageQueue.catch((err) => {
+      logger.error("Unhandled WebSocket message processing error", err);
     });
   });
+
+  async function processWebSocketMessage(data: WebSocket.RawData): Promise<void> {
+    if (ws.readyState !== WebSocket.OPEN) return;
+
+    let body: Record<string, unknown>;
+    try {
+      body = JSON.parse(data.toString("utf-8")) as Record<string, unknown>;
+    } catch {
+      await sendWsError(ws, 400, "invalid JSON", "invalid_request_error");
+      return;
+    }
+
+    const headers = new Headers();
+    for (const [key, value] of Object.entries(req.headers)) {
+      if (key.toLowerCase() === "upgrade" || key.toLowerCase() === "connection") continue;
+      if (value === undefined) continue;
+      if (Array.isArray(value)) {
+        for (const v of value) headers.append(key, v);
+      } else {
+        headers.set(key, value);
+      }
+    }
+    headers.set("Content-Type", "application/json");
+
+    const sessionId = req.headers["x-codex-session-id"] as string | undefined;
+
+    try {
+      const { response, provider, ctx } = await forwarder.forward(
+        new Request(`http://${req.headers.host}${url}`, {
+          method,
+          headers,
+          body: JSON.stringify(body),
+        }),
+        body,
+        url,
+        method,
+        headers,
+        sessionId,
+      );
+
+      const adapter = getAdapter(provider);
+
+      if (body.stream && response.body) {
+        await logRequest(ctx, response);
+        const reader = response.body.getReader();
+        activeReader = reader;
+        try {
+          await pipeWebSocketStream(ws, reader, adapter, ctx);
+        } finally {
+          reader.releaseLock();
+          if (activeReader === reader) {
+            activeReader = undefined;
+          }
+        }
+      } else {
+        await logRequest(ctx, response);
+        const resBody = await response.arrayBuffer();
+        await new Promise<void>((resolve, reject) => {
+          ws.send(Buffer.from(resBody), (err) => {
+            if (err) reject(err);
+            else resolve();
+          });
+        });
+      }
+    } catch (err) {
+      logger.error("Proxy WebSocket forwarding error", err);
+      const message = err instanceof Error ? err.message : String(err);
+      await sendWsError(ws, 502, message, "proxy_error");
+      ws.close();
+    }
+  }
 }
 
 async function sendWsError(ws: WebSocket, status: number, message: string, type: string): Promise<void> {
@@ -431,25 +461,16 @@ async function pipeStream(
 
 async function pipeWebSocketStream(
   ws: WebSocket,
-  body: ReadableStream<Uint8Array>,
+  reader: ReadableStreamDefaultReader<Uint8Array>,
   adapter: ProviderAdapter,
   ctx: RequestContext,
 ): Promise<void> {
-  const reader = body.getReader();
   let buffer = "";
-  let clientClosed = false;
-
-  const onClose = () => {
-    clientClosed = true;
-    reader.cancel().catch(() => {});
-  };
-  ws.once("close", onClose);
 
   try {
-    while (!clientClosed) {
+    while (ws.readyState === WebSocket.OPEN) {
       const { done, value } = await reader.read();
       if (done) break;
-      if (clientClosed) break;
 
       buffer = appendUtf8Safe(buffer, Buffer.from(value));
 
@@ -494,10 +515,6 @@ async function pipeWebSocketStream(
       }
     }
   } finally {
-    ws.off("close", onClose);
     reader.releaseLock();
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.close();
-    }
   }
 }

@@ -77,6 +77,110 @@ describe("websocket proxy", () => {
     ws.close();
   });
 
+  it("handles multiple messages over a single persistent WebSocket", async () => {
+    await server.stop();
+
+    let requestCount = 0;
+    const upstream = http.createServer((req, res) => {
+      let body = "";
+      req.on("data", (chunk) => (body += chunk));
+      req.on("end", () => {
+        requestCount++;
+        const parsed = JSON.parse(body);
+        expect(parsed.messages).toEqual([{ role: "user", content: "​" }]);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            id: `chatcmpl-${requestCount}`,
+            object: "chat.completion",
+            model: parsed.model,
+            choices: [{ message: { role: "assistant", content: `Reply ${requestCount}` } }],
+            usage: { prompt_tokens: 2, completion_tokens: 3, total_tokens: 5 },
+          }),
+        );
+      });
+    });
+
+    const upstreamPort = await new Promise<number>((resolve) => {
+      upstream.listen(0, "127.0.0.1", () => {
+        resolve((upstream.address() as { port: number }).port);
+      });
+    });
+
+    const handler = createRequestHandler({
+      profileName: "test",
+      port: 0,
+      listenAddress: "127.0.0.1",
+      providers: [{
+        id: "kimi",
+        type: "kimi",
+        name: "Kimi",
+        baseUrl: `http://127.0.0.1:${upstreamPort}`,
+        apiKey: "",
+        models: ["kimi-k2.7"],
+        responsesToChatCompletions: true,
+      }],
+      requestTimeout: 5000,
+      maxRetries: 0,
+      streamingFirstByteTimeout: 5000,
+      streamingIdleTimeout: 5000,
+      nonStreamingTimeout: 5000,
+    });
+
+    server = await startProxyServer(0, "127.0.0.1", handler);
+
+    const ws = new WebSocket(`ws://${server.baseUrl.replace("http://", "")}/v1/responses`);
+
+    const messages: WebSocket.RawData[] = [];
+    const opened = new Promise<void>((resolve, reject) => {
+      ws.on("open", resolve);
+      ws.on("error", reject);
+      setTimeout(() => reject(new Error("websocket open timeout")), 5000);
+    });
+
+    ws.on("message", (data) => messages.push(data));
+
+    await opened;
+
+    const firstResponse = new Promise<void>((resolve) => {
+      const check = () => {
+        if (messages.length >= 1) {
+          resolve();
+          return;
+        }
+        setTimeout(check, 10);
+      };
+      check();
+    });
+    ws.send(JSON.stringify({ model: "kimi-k2.7", input: [] }));
+    await firstResponse;
+
+    const secondResponse = new Promise<void>((resolve) => {
+      const check = () => {
+        if (messages.length >= 2) {
+          resolve();
+          return;
+        }
+        setTimeout(check, 10);
+      };
+      check();
+    });
+    ws.send(JSON.stringify({ model: "kimi-k2.7", input: [] }));
+    await secondResponse;
+
+    ws.close();
+    await new Promise<void>((resolve) => ws.on("close", resolve));
+    upstream.close();
+
+    expect(messages.length).toBe(2);
+    const first = JSON.parse(messages[0].toString("utf-8"));
+    const second = JSON.parse(messages[1].toString("utf-8"));
+    expect(first.object).toBe("response");
+    expect(first.output[0].content[0].text).toBe("Reply 1");
+    expect(second.object).toBe("response");
+    expect(second.output[0].content[0].text).toBe("Reply 2");
+  });
+
   it("emits a response.failed event when upstream returns an error", async () => {
     await server.stop();
 

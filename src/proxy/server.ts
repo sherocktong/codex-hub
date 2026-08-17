@@ -10,6 +10,10 @@ export interface ProxyServer {
 
 export type RequestHandler = (req: http.IncomingMessage, res: http.ServerResponse) => Promise<void>;
 
+export type UpgradeHandler = (req: http.IncomingMessage, socket: net.Socket, head: Buffer) => void;
+
+export type RequestHandlerWithUpgrade = RequestHandler & { handleUpgrade?: UpgradeHandler };
+
 const PORT_RANGE_MIN = 57000;
 const PORT_RANGE_MAX = 57999;
 
@@ -43,7 +47,7 @@ export async function findAvailablePort(listenAddress: string): Promise<number> 
 export async function startProxyServer(
   port: number,
   listenAddress: string,
-  requestHandler: RequestHandler,
+  requestHandler: RequestHandlerWithUpgrade,
 ): Promise<ProxyServer> {
   const actualPort = port === 0 ? await findAvailablePort(listenAddress) : port;
 
@@ -59,6 +63,10 @@ export async function startProxyServer(
       }
     }
   });
+
+  if (requestHandler.handleUpgrade) {
+    server.on("upgrade", requestHandler.handleUpgrade);
+  }
 
   return new Promise((resolve, reject) => {
     server.listen(actualPort, listenAddress, () => {
