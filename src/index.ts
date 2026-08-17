@@ -2,14 +2,12 @@ import { Command } from "commander";
 import { createRequire } from "module";
 import { installGlobalExceptionHandlers, setLogLevel } from "./logger.js";
 import { SETTINGS_FILE, ensureSettingsFile, readJson } from "./config.js";
-import { profileCommand, useCommand, runCommand, unproxyCommand } from "./profiles/index.js";
+import { profileCommand, useCommand, runCommand } from "./profiles/index.js";
 import { hooksCommand } from "./hooks/index.js";
 import { sessionCommand } from "./sessions/index.js";
 import { completionCommand } from "./complete/index.js";
-import { providerListCommand } from "./proxy/index.js";
-import { cacheCommand } from "./cache/index.js";
+import { providerListCommand, proxyCommand } from "./proxy/index.js";
 import { codexVersionCommand } from "./codex-version/index.js";
-import { proxyServerCommand } from "./proxy/proxy-command.js";
 import type { SettingsData } from "./types.js";
 
 const _require = createRequire(import.meta.url);
@@ -32,17 +30,24 @@ program
 program.addCommand(profileCommand());
 program.addCommand(useCommand());
 program.addCommand(runCommand());
-program.addCommand(unproxyCommand());
 program.addCommand(hooksCommand());
 program.addCommand(sessionCommand());
 program.addCommand(completionCommand());
 program.addCommand(providerListCommand());
+program.addCommand(proxyCommand());
 program.addCommand(codexVersionCommand());
-program.addCommand(proxyServerCommand());
 
-try {
-  program.parse();
-} catch (err) {
-  console.error("Unexpected error:", err instanceof Error ? err.message : String(err));
-  process.exit(1);
+// Internal daemon entry point: when this env var is set, start a proxy daemon
+// for the named profile instead of parsing CLI arguments.
+const proxyServerProfile = process.env.CODX_PROXY_SERVER_PROFILE;
+if (proxyServerProfile) {
+  const { runProxyDaemonForProfile } = await import("./proxy/daemon-runner.js");
+  await runProxyDaemonForProfile(proxyServerProfile);
+} else {
+  try {
+    program.parse();
+  } catch (err) {
+    console.error("Unexpected error:", err instanceof Error ? err.message : String(err));
+    process.exit(1);
+  }
 }

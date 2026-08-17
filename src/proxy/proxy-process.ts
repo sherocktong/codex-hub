@@ -3,6 +3,7 @@ import path from "node:path";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import * as logger from "../logger.js";
+import { ensureProxyLogDir } from "./logging.js";
 
 function resolveCliPath(): string {
   // Use the currently executing script if it is the CLI bundle. This handles
@@ -35,8 +36,10 @@ export interface ProxyDaemonHandle {
 }
 
 export async function startProxyDaemon(profileName: string): Promise<ProxyDaemonHandle> {
-  const args = [CLI_PATH, "__proxy-server", profileName];
+  const args = [CLI_PATH];
   logger.debug(`Starting proxy daemon for profile '${profileName}': ${args.join(" ")}`);
+
+  const logDir = ensureProxyLogDir(profileName);
 
   return new Promise((resolve, reject) => {
     let resolved = false;
@@ -49,6 +52,8 @@ export async function startProxyDaemon(profileName: string): Promise<ProxyDaemon
       env: {
         ...process.env,
         CODX_PROXY_PARENT_PID: String(process.pid),
+        CODX_PROXY_SERVER_PROFILE: profileName,
+        CODX_PROXY_LOG_DIR: logDir,
       },
     });
     child.unref();
@@ -73,6 +78,11 @@ export async function startProxyDaemon(profileName: string): Promise<ProxyDaemon
             pid: child.pid!,
             kill: () => stopDaemon(child),
           });
+          // Close the parent's pipe ends so the spawning process can exit even
+          // though the daemon keeps running. The daemon logs to its own log file,
+          // so it does not depend on these streams.
+          child.stdout?.destroy();
+          child.stderr?.destroy();
           return;
         }
       }
@@ -133,6 +143,65 @@ async function stopDaemon(child: ReturnType<typeof spawn>): Promise<void> {
       child.kill("SIGTERM");
     } catch {
       clearTimeout(timeout);
+      resolve();
+    }
+  });
+}
+
+export function spawnManagedProxyDaemon(profileName: string, port: number): { pid: number } {
+  const args = [CLI_PATH];
+  logger.debug(`Spawning managed proxy daemon for profile '${profileName}' on port ${port}: ${args.join(" ")}`);
+
+  const logDir = ensureProxyLogDir(profileName);
+
+  const child = spawn(process.execPath, args, {
+    detached: true,
+    // Ignore all stdio so the spawning CLI exits immediately and is not kept
+    // alive by open pipes. The daemon logs to its own per-proxy log file.
+    stdio: ["ignore", "ignore", "ignore"],
+    env: {
+      ...process.env,
+      CODX_PROXY_PARENT_PID: String(process.pid),
+      CODX_PROXY_SERVER_PROFILE: profileName,
+      CODX_PROXY_LOG_DIR: logDir,
+      CODX_PROXY_FORCE_PORT: String(port),
+    },
+  });
+  child.unref();
+
+  if (!child.pid) {
+    throw new Error(`Failed to spawn managed proxy daemon for profile '${profileName}'`);
+  }
+
+  return { pid: child.pid };
+}
+
+export async function killProxyProcess(pid: number): Promise<void> {
+  return new Promise((resolve) => {
+    const timeout = setTimeout(() => {
+      try {
+        process.kill(pid, "SIGKILL");
+      } catch {
+        // ignore
+      }
+      resolve();
+    }, 5000);
+
+    const checkInterval = setInterval(() => {
+      try {
+        process.kill(pid, 0);
+      } catch {
+        clearTimeout(timeout);
+        clearInterval(checkInterval);
+        resolve();
+      }
+    }, 100);
+
+    try {
+      process.kill(pid, "SIGTERM");
+    } catch {
+      clearTimeout(timeout);
+      clearInterval(checkInterval);
       resolve();
     }
   });

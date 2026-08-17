@@ -42,9 +42,10 @@ _codx() {
   COMPREPLY=()
   cur="\${COMP_WORDS[COMP_CWORD]}"
   prev="\${COMP_WORDS[COMP_CWORD-1]}"
-  commands="profile use run unproxy provider hook session codex-version completion help"
+  commands="profile use run proxy provider hook session codex-version completion help"
 
   local profile_subcmds="add update list view remove rename"
+  local proxy_subcmds="start stop restart status log list"
   local provider_types="kimi qianwen"
   local hooks_subcmds="list add remove enable disable"
   local session_subcmds="list show search ps stats clean troubleshoot"
@@ -79,6 +80,15 @@ _codx() {
           local update_opts="--model -m --delete-model -d --token -t --url -u --provider -p"
           COMPREPLY=($(compgen -W "$update_opts" -- "$cur"))
         fi
+      fi
+      ;;
+    proxy)
+      if [[ \${COMP_CWORD} -eq 2 ]]; then
+        COMPREPLY=($(compgen -W "$proxy_subcmds" -- "$cur"))
+      elif [[ "$prev" == "start" || "$prev" == "restart" || "$prev" == "status" || "$prev" == "log" ]]; then
+        _codx_profiles
+      elif [[ "$prev" == "stop" ]]; then
+        _codx_profiles
       fi
       ;;
     use|run)

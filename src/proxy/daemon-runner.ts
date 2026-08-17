@@ -1,4 +1,3 @@
-import { Command } from "commander";
 import { PROFILES_FILE, ensureProfilesFile, readJson } from "../config.js";
 import type { ProfilesData } from "../types.js";
 import { startProxyServer } from "./server.js";
@@ -16,67 +15,71 @@ import {
 } from "./proxy-registry.js";
 import * as logger from "../logger.js";
 
-export function proxyServerCommand(): Command {
-  return new Command("__proxy-server")
-    .description("Internal command: start a profile proxy daemon")
-    .argument("<profileName>", "Profile name")
-    .action(async (profileName: string) => {
-      try {
-        ensureProfilesFile();
-        const data = readJson<ProfilesData>(PROFILES_FILE);
-        const profile = data.profiles[profileName];
-        if (!profile) {
-          console.error(`Profile '${profileName}' not found.`);
-          process.exit(1);
-        }
+export async function runProxyDaemonForProfile(profileName: string): Promise<void> {
+  try {
+    ensureProfilesFile();
+    const data = readJson<ProfilesData>(PROFILES_FILE);
+    const profile = data.profiles[profileName];
+    if (!profile) {
+      console.error(`Profile '${profileName}' not found.`);
+      process.exit(1);
+    }
 
-        ensureProviderPresetsExist();
-        const config = buildProxyInstanceConfig(profileName, profile);
+    ensureProviderPresetsExist();
+    const config = buildProxyInstanceConfig(profileName, profile);
 
-        const requestHandler = createRequestHandler(config);
+    const forcedPort = Number(process.env.CODX_PROXY_FORCE_PORT);
+    if (Number.isFinite(forcedPort) && forcedPort > 0) {
+      config.port = forcedPort;
+    }
 
-        // Use the configured port exactly. If it is in use, fail loudly so the
-        // user can resolve the conflict rather than silently floating to a new
-        // port and leaving config files stale.
-        const server = await startProxyServer(config.port, config.listenAddress, requestHandler);
+    const requestHandler = createRequestHandler(config);
 
-        console.log(`PROXY_READY port=${server.port}`);
-        logger.info(`Proxy daemon for '${profileName}' listening on ${server.baseUrl}`);
+    // Use the configured port exactly. If it is in use, fail loudly so the
+    // user can resolve the conflict rather than silently floating to a new
+    // port and leaving config files stale.
+    const server = await startProxyServer(config.port, config.listenAddress, requestHandler);
 
-        const parentPid = Number(process.env.CODX_PROXY_PARENT_PID);
-        startParentLivenessWatcher(profileName, parentPid, server);
-        startConsumerLivenessWatcher(profileName, server);
+    console.log(`PROXY_READY port=${server.port}`);
+    logger.info(`Proxy daemon for '${profileName}' listening on ${server.baseUrl}`);
 
-        process.on("SIGTERM", async () => {
-          logger.debug(`Proxy daemon for '${profileName}' received SIGTERM`);
-          await server.stop();
-          process.exit(0);
-        });
+    const parentPid = Number(process.env.CODX_PROXY_PARENT_PID);
+    startParentLivenessWatcher(profileName, parentPid, server);
+    startConsumerLivenessWatcher(profileName, server);
 
-        process.on("SIGINT", async () => {
-          logger.debug(`Proxy daemon for '${profileName}' received SIGINT`);
-          await server.stop();
-          process.exit(0);
-        });
-
-        process.on("SIGHUP", async () => {
-          logger.debug(`Proxy daemon for '${profileName}' received SIGHUP`);
-          try {
-            await shutdownIfUnused(profileName, server);
-          } catch (err) {
-            logger.error(`Shutdown check failed for '${profileName}'`, err);
-          }
-          process.exit(0);
-        });
-      } catch (err) {
-        logger.error(`Proxy daemon failed for profile`, err);
-        console.error("Error:", err instanceof Error ? err.message : String(err));
-        process.exit(1);
-      }
+    process.on("SIGTERM", async () => {
+      logger.debug(`Proxy daemon for '${profileName}' received SIGTERM`);
+      await server.stop();
+      process.exit(0);
     });
+
+    process.on("SIGINT", async () => {
+      logger.debug(`Proxy daemon for '${profileName}' received SIGINT`);
+      await server.stop();
+      process.exit(0);
+    });
+
+    process.on("SIGHUP", async () => {
+      logger.debug(`Proxy daemon for '${profileName}' received SIGHUP`);
+      try {
+        await shutdownIfUnused(profileName, server);
+      } catch (err) {
+        logger.error(`Shutdown check failed for '${profileName}'`, err);
+      }
+      process.exit(0);
+    });
+  } catch (err) {
+    logger.error(`Proxy daemon failed for profile`, err);
+    console.error("Error:", err instanceof Error ? err.message : String(err));
+    process.exit(1);
+  }
 }
 
-function startParentLivenessWatcher(profileName: string, parentPid: number, server: Awaited<ReturnType<typeof startProxyServer>>): void {
+function startParentLivenessWatcher(
+  profileName: string,
+  parentPid: number,
+  server: Awaited<ReturnType<typeof startProxyServer>>,
+): void {
   if (!Number.isFinite(parentPid) || parentPid <= 0) {
     logger.debug(`No valid CODX_PROXY_PARENT_PID for '${profileName}', skipping liveness watcher`);
     return;
@@ -96,7 +99,10 @@ function startParentLivenessWatcher(profileName: string, parentPid: number, serv
   interval.unref();
 }
 
-function startConsumerLivenessWatcher(profileName: string, server: Awaited<ReturnType<typeof startProxyServer>>): void {
+function startConsumerLivenessWatcher(
+  profileName: string,
+  server: Awaited<ReturnType<typeof startProxyServer>>,
+): void {
   const checkIntervalMs = 1000;
   const interval = setInterval(async () => {
     // Never block the daemon's event loop waiting for the registry lock. A

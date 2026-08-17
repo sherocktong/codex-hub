@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 
-const LOG_DIR = path.join(os.homedir(), ".codex", "codx", "logs");
+const LOG_DIR = process.env.CODX_PROXY_LOG_DIR || path.join(os.homedir(), ".codex", "codx", "logs");
 
 const LEVEL_PRIORITY: Record<string, number> = {
   DEBUG: 0,

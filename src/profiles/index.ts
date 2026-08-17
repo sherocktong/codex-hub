@@ -1,2 +1,2 @@
-export { profileCommand, useCommand, runCommand, unproxyCommand } from "./commands.js";
+export { profileCommand, useCommand, runCommand } from "./commands.js";
 export { execCodex, resolveCodexBinary } from "./runner.js";

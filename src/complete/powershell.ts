@@ -5,7 +5,7 @@ export const POWERSHELL_COMPLETION = `Register-ArgumentCompleter -Native -Comman
     'profile:Manage Codex CLI profiles'
     'use:Set a profile as the default'
     'run:Launch Codex CLI using the default or a specified profile'
-    'unproxy:Stop all running provider proxies'
+    'proxy:Manage provider proxy daemons'
     'provider:List configured providers'
     'hook:Manage Codex CLI hooks in settings.json'
     'session:Manage Codex CLI sessions'
@@ -15,6 +15,7 @@ export const POWERSHELL_COMPLETION = `Register-ArgumentCompleter -Native -Comman
   )
 
   $profileSubcmds = @('add', 'update', 'list', 'view', 'remove', 'rename', 'default')
+  $proxySubcmds = @('start', 'stop', 'restart', 'status', 'log', 'list')
   $hookSubcmds = @('list', 'add', 'remove', 'enable', 'disable')
   $sessionSubcmds = @('list', 'show', 'search', 'ps', 'stats', 'clean', 'troubleshoot')
   $codexVersionSubcmds = @('list', 'pin', 'unpin')
@@ -32,6 +33,12 @@ export const POWERSHELL_COMPLETION = `Register-ArgumentCompleter -Native -Comman
     'profile' {
       if ($tokens.Count -eq 2 -or ($tokens.Count -eq 3 -and $wordToComplete -ne '')) {
         $profileSubcmds | ForEach-Object { if ($_ -like "$wordToComplete*") { $_ } }
+        return
+      }
+    }
+    'proxy' {
+      if ($tokens.Count -eq 2 -or ($tokens.Count -eq 3 -and $wordToComplete -ne '')) {
+        $proxySubcmds | ForEach-Object { if ($_ -like "$wordToComplete*") { $_ } }
         return
       }
     }

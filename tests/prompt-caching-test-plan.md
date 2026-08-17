@@ -117,7 +117,7 @@ Verify that `codx` correctly routes OpenAI-compatible requests to Kimi and Qianw
 | CLI-01 | `provider list` | Run `codx provider list`. | Lists Kimi and Qianwen with `promptCacheRouting: enabled`. | P1 |
 | CLI-02 | `profile add -p kimi` | Add a profile with Kimi provider. | Output shows proxy URL and provider URL. | P1 |
 | CLI-03 | `run` starts proxy | Run `codx run <profile>` and hit `/health`. | Returns `200 ok`. | P1 |
-| CLI-04 | `unproxy` stops all | Start two profile proxies, run `codx unproxy`, retry `/health`. | Both proxies are unreachable. | P1 |
+| CLI-04 | `proxy stop` stops all | Start two profile proxies, run `codx proxy stop`, retry `/health`. | Both proxies are unreachable. | P1 |
 | CLI-05 | Cache key in response | Send two identical `/v1/responses` via proxy. | Both include stable `prompt_cache_key`; mock upstream sees the same key. | P1 |
 
 ## 6. Test Data

@@ -7,7 +7,7 @@ import {
 } from "../config.js";
 import type { ProfilesData, Profile, ProviderType } from "../types.js";
 import { getProviderConfig, getDefaultProviderPresets, readProxyConfig } from "../proxy/config.js";
-import { stopAllProxies, getRunningProxy, reserveProxyPortAsync } from "../proxy/instance-manager.js";
+import { getRunningProxy, reserveProxyPortAsync } from "../proxy/instance-manager.js";
 import { execCodex } from "./runner.js";
 import {
   syncNativeProfile,
@@ -416,15 +416,6 @@ export function profileCommand(): Command {
     .action(safeAction(renameProfileAction));
 
   return profile;
-}
-
-export function unproxyCommand(): Command {
-  return new Command("unproxy")
-    .description("Stop all running provider proxies")
-    .action(safeAction(async () => {
-      await stopAllProxies();
-      console.log("All provider proxies stopped.");
-    }));
 }
 
 export function useCommand(): Command {

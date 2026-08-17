@@ -6,19 +6,23 @@ _codx() {
     'profile:Manage Codex CLI profiles'
     'use:Set a profile as the default'
     'run:Launch Codex CLI using the default or a specified profile'
-    'unproxy:Stop all running provider proxies'
+    'proxy:Manage provider proxy daemons'
     'provider:List configured providers'
     'hook:Manage Codex CLI hooks in settings.json'
     'session:Manage Codex CLI sessions'
-    'cache:Manage Codex CLI cache and backup files'
     'codex-version:Manage Codex CLI versions'
     'completion:Print shell completion functions'
     'help:Display help for a command'
   )
 
-  local -a cache_subcmds
-  cache_subcmds=(
-    'restore:Restore ~/.codex/config.json.backup to ~/.codex/config.json'
+  local -a proxy_subcmds
+  proxy_subcmds=(
+    'start:Start a proxy daemon for a profile'
+    'stop:Stop a proxy daemon'
+    'restart:Restart a proxy daemon for a profile'
+    'status:Show status of proxy daemons'
+    'log:Show recent logs for a proxy daemon'
+    'list:List running proxy daemons'
   )
 
   local -a profile_subcmds
@@ -120,16 +124,18 @@ _codx() {
         use|run)
           '*:profile:_codx_profiles'
           ;;
+        proxy)
+          if (( CURRENT == 2 )); then
+            _describe -t proxy-subcmds 'proxy subcommand' proxy_subcmds
+          elif [[ $words[2] == "start" || $words[2] == "restart" || $words[2] == "status" || $words[2] == "log" || $words[2] == "stop" ]]; then
+            _codx_profiles
+          fi
+          ;;
         provider)
           ;;
         hook)
           if (( CURRENT == 2 )); then
             _describe -t hooks-subcmds 'hook subcommand' hooks_subcmds
-          fi
-          ;;
-        cache)
-          if (( CURRENT == 2 )); then
-            _describe -t cache-subcmds 'cache subcommand' cache_subcmds
           fi
           ;;
         session)
