@@ -6,7 +6,6 @@ import * as logger from "./logger.js";
 export const CODEX_DIR = process.env.CODEX_DIR || path.join(os.homedir(), ".codex");
 export const PROFILES_FILE = process.env.CODEX_PROFILES_FILE || path.join(CODEX_DIR, "profiles.json");
 export const SETTINGS_FILE = process.env.CODEX_SETTINGS_FILE || path.join(CODEX_DIR, "settings.json");
-export const PROJECTS_DIR = path.join(CODEX_DIR, "projects");
 export const SESSIONS_DIR = path.join(CODEX_DIR, "sessions");
 
 export function ensureFile(filePath: string, defaultContent: string): void {
