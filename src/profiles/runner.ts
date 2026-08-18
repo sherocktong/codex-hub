@@ -1,7 +1,8 @@
 import { spawn, execSync } from "node:child_process";
-import type { Profile } from "../types.js";
+import type { Profile, ProviderConfig } from "../types.js";
 import { createBinaryResolver } from "../platform/index.js";
 import { acquireProfileProxy } from "../proxy/instance-manager.js";
+import { getProviderConfig } from "../proxy/config.js";
 import { addRegistryConsumer, removeRegistryConsumer } from "../proxy/proxy-registry.js";
 import {
   syncNativeProfile,
@@ -95,6 +96,19 @@ export function buildCodexCommand(args: {
   return [args.binary, "--profile", args.profileName, ...args.extraArgs];
 }
 
+function warnIfGoalApiUnsupported(
+  profileName: string,
+  model: string | undefined,
+  provider: ProviderConfig | undefined,
+): void {
+  if (!provider || provider.supportsGoalApi !== false) return;
+
+  const modelName = model || provider.models[0] || "unknown";
+  console.error(
+    `Warning: profile '${profileName}' uses model '${modelName}' which does not reliably support Codex's goal API. Codex may ask "what would you like to work on?" instead of executing your request.`,
+  );
+}
+
 export async function execCodex(profileName: string, p: Profile, extraArgs: string[]): Promise<void> {
   const models = p.models || (p.model ? [p.model] : []);
   const firstModel = models[0];
@@ -116,6 +130,8 @@ export async function execCodex(profileName: string, p: Profile, extraArgs: stri
 
   const binary = resolveCodexBinary();
   const proxyBaseUrl = `${acquired.running.server.baseUrl}/v1`;
+  const resolvedProvider = acquired.running.config.providers[0];
+  warnIfGoalApiUnsupported(profileName, firstModel, resolvedProvider);
 
   if (isDesktopApp) {
     // The desktop app is launched by the OS launcher and cannot receive

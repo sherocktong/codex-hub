@@ -13,6 +13,12 @@ export interface ProviderConfig {
   promptCacheRouting?: PromptCacheRoutingMode;
   responsesToChatCompletions?: boolean;
   headers?: Record<string, string>;
+  /**
+   * Whether models served by this provider reliably support Codex CLI's internal
+   * goal API (e.g. get_goal). When false, Codex may ask "what would you like to
+   * work on?" instead of executing the requested task.
+   */
+  supportsGoalApi?: boolean;
 }
 
 export interface Profile {

@@ -4,6 +4,7 @@ import {
   translateChatResponseToResponses,
   translateChatStreamChunkToResponses,
   createResponsesDoneChunk,
+  maybeWrapGoalApiResponse,
 } from "../src/proxy/responses-translator.js";
 import type { ProviderConfig } from "../src/types.js";
 
@@ -250,5 +251,72 @@ describe("responses-to-chat-completions translator", () => {
       },
     ]);
     expect(result.upstreamBody.tool_choice).toEqual({ type: "function", function: { name: "exec_command" } });
+  });
+
+  it("wraps a get_goal function_call when the provider does not support the goal API", () => {
+    const noGoalProvider: ProviderConfig = { ...provider, supportsGoalApi: false };
+    const response = translateChatResponseToResponses(
+      {
+        id: "chatcmpl-goal",
+        object: "chat.completion",
+        model: "kimi-k2-5-coding",
+        choices: [
+          {
+            message: {
+              role: "assistant",
+              tool_calls: [
+                {
+                  id: "call_goal",
+                  type: "function",
+                  function: { name: "get_goal", arguments: "{}" },
+                },
+              ],
+            },
+          },
+        ],
+        usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+      },
+      { model: "kimi-k2.7" },
+      noGoalProvider,
+    );
+
+    const wrapped = maybeWrapGoalApiResponse(response, noGoalProvider);
+    expect(wrapped).toBeDefined();
+    const output = wrapped!.output as Array<Record<string, unknown>>;
+    expect(output).toHaveLength(1);
+    expect(output[0].type).toBe("function_call_output");
+    expect(output[0].name).toBe("get_goal");
+    const callOutput = JSON.parse(output[0].output as string);
+    expect(callOutput.goal).toBeNull();
+    expect(callOutput.error).toContain("does not reliably support Codex's goal API");
+  });
+
+  it("does not wrap get_goal when the provider supports the goal API", () => {
+    const yesGoalProvider: ProviderConfig = { ...provider, supportsGoalApi: true };
+    const response = translateChatResponseToResponses(
+      {
+        id: "chatcmpl-goal",
+        object: "chat.completion",
+        model: "kimi-k2-5-coding",
+        choices: [
+          {
+            message: {
+              role: "assistant",
+              tool_calls: [
+                {
+                  id: "call_goal",
+                  type: "function",
+                  function: { name: "get_goal", arguments: "{}" },
+                },
+              ],
+            },
+          },
+        ],
+      },
+      { model: "kimi-k2.7" },
+      yesGoalProvider,
+    );
+
+    expect(maybeWrapGoalApiResponse(response, yesGoalProvider)).toBeUndefined();
   });
 });
