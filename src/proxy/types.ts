@@ -50,6 +50,7 @@ export interface ProviderAdapter {
   ): Record<string, unknown> | Record<string, unknown>[];
   parseUsage?(chunk: Record<string, unknown>): TokenUsage | undefined;
   supportsPromptCacheRouting: boolean;
+  translateError?(response: Response, bodyText: string): Promise<Response | undefined>;
 }
 
 export interface CircuitBreakerConfig {

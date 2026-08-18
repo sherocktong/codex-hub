@@ -616,4 +616,69 @@ describe("proxy integration", () => {
     const ids = json.data.map((m: { id: string }) => m.id).sort();
     expect(ids).toEqual(["kimi-k2", "kimi-k2-5", "qwen-max"]);
   });
+
+  it("translates Qianwen context-length errors into OpenAI-compatible errors", async () => {
+    upstream = http.createServer((req, res) => {
+      let body = "";
+      req.on("data", (chunk) => (body += chunk));
+      req.on("end", () => {
+        expect(req.url).toBe("/v1/chat/completions");
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            code: "BadRequest.DataInspectionFailed",
+            message:
+              "Data inspection failed, input length is 1234567, range of input length should be [1, 983616]",
+            request_id: "test-req-id",
+          }),
+        );
+      });
+    });
+
+    const upstreamPort = await new Promise<number>((resolve) => {
+      upstream!.listen(0, "127.0.0.1", () => {
+        resolve((upstream!.address() as { port: number }).port);
+      });
+    });
+
+    const config: ProxyInstanceConfig = {
+      profileName: "test",
+      port: 0,
+      listenAddress: "127.0.0.1",
+      providers: [
+        {
+          id: "qianwen",
+          type: "qianwen",
+          name: "Qianwen",
+          baseUrl: `http://127.0.0.1:${upstreamPort}`,
+          apiKey: "test-key",
+          models: ["qwen-max"],
+          responsesToChatCompletions: true,
+        },
+      ],
+      requestTimeout: 5000,
+      maxRetries: 0,
+      streamingFirstByteTimeout: 5000,
+      streamingIdleTimeout: 5000,
+      nonStreamingTimeout: 5000,
+    };
+
+    proxyServer = await startProxyServer(config.port, config.listenAddress, createRequestHandler(config));
+
+    const response = await fetch(`${proxyServer.baseUrl}/v1/responses`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: "Bearer client" },
+      body: JSON.stringify({
+        model: "qwen-max",
+        input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "hello" }] }],
+      }),
+    });
+
+    expect(response.status).toBe(400);
+    const json = await response.json();
+    expect(json.error.type).toBe("context_length_exceeded");
+    expect(json.error.code).toBe("context_length_exceeded");
+    expect(json.error.param).toBe("messages");
+    expect(json.error.message).toContain("983616");
+  });
 });

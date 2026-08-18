@@ -4,6 +4,7 @@ import { createBinaryResolver } from "../platform/index.js";
 import { acquireProfileProxy } from "../proxy/instance-manager.js";
 import { addRegistryConsumer, removeRegistryConsumer } from "../proxy/proxy-registry.js";
 import {
+  syncNativeProfile,
   activateProfileConfig,
 } from "./profile-syncer.js";
 import * as logger from "../logger.js";
@@ -116,16 +117,19 @@ export async function execCodex(profileName: string, p: Profile, extraArgs: stri
   const binary = resolveCodexBinary();
   const proxyBaseUrl = `${acquired.running.server.baseUrl}/v1`;
 
-  // Sync the per-profile file and merge it into the base config.toml.
-  // Base config.toml is preserved: profile values overwrite duplicates and
-  // base-only entries (user settings, project trust levels) are kept.
-  activateProfileConfig(profileName, p, proxyBaseUrl);
-
   if (isDesktopApp) {
+    // The desktop app is launched by the OS launcher and cannot receive
+    // --profile. Activate the profile by merging it into config.toml so the
+    // desktop app uses it.
+    // activateProfileConfig(profileName, p, proxyBaseUrl);
     logger.info(
       `Activated profile '${profileName}' for desktop: config.toml merged with ${profileName}.config.toml (proxy=${proxyBaseUrl} model=${firstModel || "(default)"})`,
     );
   } else {
+    // CLI Codex supports --profile. Sync the profile file but leave the base
+    // config.toml untouched so concurrent launches of different profiles do
+    // not race on the shared file.
+    await syncNativeProfile(profileName, p, proxyBaseUrl);
     logger.info(
       `Synced profile '${profileName}': ${profileName}.config.toml (proxy=${proxyBaseUrl} model=${firstModel || "(default)"})`,
     );

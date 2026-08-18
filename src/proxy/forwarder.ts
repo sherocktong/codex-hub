@@ -61,6 +61,18 @@ export function createForwarder(
             return { response, provider, ctx };
           }
 
+          // Give providers a chance to rewrite upstream error responses (e.g.
+          // Qianwen's context-length error) into an OpenAI-compatible shape
+          // before treating the request as failed.
+          if (adapter.translateError) {
+            const errText = await upstreamRes.clone().text();
+            const translated = await adapter.translateError(upstreamRes.clone(), errText);
+            if (translated) {
+              router.recordResult(provider.id, true);
+              return { response: translated, provider, ctx };
+            }
+          }
+
           const errText = await upstreamRes.text();
           logger.warn(`forward: upstream error from ${provider.name}: ${upstreamRes.status} ${errText.slice(0, 200)}`);
           lastErrorMessages.push(`${provider.name}: ${upstreamRes.status}`);
