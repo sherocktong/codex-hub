@@ -968,6 +968,141 @@ describe("responses-to-chat-completions translator", () => {
     expect(finalChunk?.some((e) => e.type === "response.completed")).toBe(true);
   });
 
+  it("routes a leading inline think block to a reasoning item", () => {
+    const ctx = { state: {} };
+    const originalBody = { model: "kimi-k2.7" };
+
+    const firstChunk = translateChatStreamChunkToResponses(
+      ctx,
+      {
+        id: "chatcmpl-think",
+        created: 1234567890,
+        choices: [{ delta: { role: "assistant", content: "<think>" } }],
+      },
+      originalBody,
+    );
+    expect(firstChunk?.[0].type).toBe("response.created");
+    expect(firstChunk?.some((e) => e.type === "response.output_item.added")).toBe(false);
+
+    const reasoningChunk = translateChatStreamChunkToResponses(
+      ctx,
+      {
+        id: "chatcmpl-think",
+        created: 1234567890,
+        choices: [{ delta: { content: "Hidden reasoning</think>Answer." } }],
+      },
+      originalBody,
+    );
+    expect(reasoningChunk?.some((e) => e.type === "response.output_item.added")).toBe(true);
+    expect(reasoningChunk?.some((e) => e.type === "response.reasoning_summary_text.delta")).toBe(true);
+    expect(reasoningChunk?.some((e) => e.type === "response.output_text.delta")).toBe(true);
+
+    const finalChunk = translateChatStreamChunkToResponses(
+      ctx,
+      {
+        id: "chatcmpl-think",
+        created: 1234567890,
+        choices: [{ delta: {}, finish_reason: "stop" }],
+      },
+      originalBody,
+    );
+    expect(finalChunk?.some((e) => e.type === "response.output_item.done")).toBe(true);
+    expect(finalChunk?.some((e) => e.type === "response.completed")).toBe(true);
+  });
+
+  it("canonicalizes streaming function_call arguments on done", () => {
+    const ctx = { state: {} };
+    const originalBody = { model: "kimi-k2.7" };
+
+    translateChatStreamChunkToResponses(
+      ctx,
+      {
+        id: "chatcmpl-tool-canon",
+        created: 1234567890,
+        choices: [{ delta: { role: "assistant" } }],
+      },
+      originalBody,
+    );
+
+    translateChatStreamChunkToResponses(
+      ctx,
+      {
+        id: "chatcmpl-tool-canon",
+        created: 1234567890,
+        choices: [
+          {
+            delta: {
+              tool_calls: [{ index: 0, id: "call_1", function: { name: "calculator", arguments: '{ "x": 1' } }],
+            },
+          },
+        ],
+      },
+      originalBody,
+    );
+
+    translateChatStreamChunkToResponses(
+      ctx,
+      {
+        id: "chatcmpl-tool-canon",
+        created: 1234567890,
+        choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: ' }' } }] } }],
+      },
+      originalBody,
+    );
+
+    const finalChunk = translateChatStreamChunkToResponses(
+      ctx,
+      {
+        id: "chatcmpl-tool-canon",
+        created: 1234567890,
+        choices: [{ delta: {}, finish_reason: "tool_calls" }],
+      },
+      originalBody,
+    );
+    const doneEvent = finalChunk?.find((e) => e.type === "response.function_call_arguments.done") as
+      | Record<string, unknown>
+      | undefined;
+    expect(doneEvent).toBeDefined();
+    expect(doneEvent.arguments).toBe('{"x":1}');
+  });
+
+  it("maps streaming finish_reason length to incomplete status", () => {
+    const ctx = { state: { textOutputItemAdded: true, accumulatedText: "Hello" } };
+    const translated = translateChatStreamChunkToResponses(
+      ctx,
+      {
+        id: "chatcmpl-length",
+        created: 1234567890,
+        choices: [{ delta: {}, finish_reason: "length" }],
+      },
+      { model: "kimi-k2.7" },
+    );
+    const completed = translated.find((e) => e.type === "response.completed") as Record<string, unknown> | undefined;
+    expect(completed).toBeDefined();
+    expect((completed?.response as Record<string, unknown>)?.status).toBe("incomplete");
+    expect((completed?.response as Record<string, unknown>)?.incomplete_details).toEqual({
+      reason: "max_output_tokens",
+    });
+  });
+
+  it("emits response.failed for an upstream error chunk", () => {
+    const ctx = { state: {} };
+    const translated = translateChatStreamChunkToResponses(
+      ctx,
+      {
+        id: "chatcmpl-err",
+        error: { message: "context length exceeded", type: "invalid_request_error", code: "context_length" },
+      },
+      { model: "kimi-k2.7" },
+    );
+    expect(translated).toHaveLength(1);
+    expect(translated[0].type).toBe("response.failed");
+    const error = (translated[0].response as Record<string, unknown>)?.error as Record<string, unknown>;
+    expect(error?.message).toBe("context length exceeded");
+    expect(error?.type).toBe("invalid_request_error");
+    expect(error?.code).toBe("context_length");
+  });
+
   it("allocates distinct output indices for text and tool calls", () => {
     const ctx = { state: {} };
     const originalBody = { model: "kimi-k2.7" };

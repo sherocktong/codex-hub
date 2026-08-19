@@ -860,6 +860,185 @@ function createSummaryTextPart(text: string): Record<string, unknown> {
   return { type: "summary_text", text: text ?? "" };
 }
 
+const THINK_OPEN_TAG = "<think>";
+const THINK_CLOSE_TAG = "</think>";
+
+function ensureReasoningOutputItem(
+  ctx: { state: Record<string, unknown> },
+  reasoningItemId: string,
+): { outputIndex: number; events: Record<string, unknown>[] } {
+  if (ctx.state.reasoningOutputItemAdded) {
+    return { outputIndex: ctx.state.reasoningOutputIndex as number, events: [] };
+  }
+  ctx.state.reasoningOutputItemAdded = true;
+  const outputIndex = allocateOutputIndex(ctx);
+  ctx.state.reasoningOutputIndex = outputIndex;
+  return {
+    outputIndex,
+    events: [
+      {
+        type: "response.output_item.added",
+        output_index: outputIndex,
+        item: createReasoningItem(reasoningItemId, "in_progress"),
+      },
+      {
+        type: "response.reasoning_summary_part.added",
+        item_id: reasoningItemId,
+        output_index: outputIndex,
+        summary_index: 0,
+        part: createSummaryTextPart(""),
+      },
+    ],
+  };
+}
+
+function emitReasoningDelta(
+  ctx: { state: Record<string, unknown> },
+  reasoningText: string,
+  reasoningItemId: string,
+): Record<string, unknown>[] {
+  if (!reasoningText) return [];
+  const { outputIndex, events } = ensureReasoningOutputItem(ctx, reasoningItemId);
+  const current = (ctx.state.accumulatedReasoning as string) ?? "";
+  ctx.state.accumulatedReasoning = current + reasoningText;
+  events.push({
+    type: "response.reasoning_summary_text.delta",
+    item_id: reasoningItemId,
+    output_index: outputIndex,
+    summary_index: 0,
+    delta: reasoningText,
+  });
+  return events;
+}
+
+function emitTextDelta(
+  ctx: { state: Record<string, unknown> },
+  text: string,
+  textItemId: string,
+): Record<string, unknown>[] {
+  if (!text) return [];
+  const events: Record<string, unknown>[] = [];
+  if (!ctx.state.textOutputItemAdded) {
+    ctx.state.textOutputItemAdded = true;
+    const outputIndex = allocateOutputIndex(ctx);
+    ctx.state.textOutputIndex = outputIndex;
+    events.push({
+      type: "response.output_item.added",
+      output_index: outputIndex,
+      item: createAssistantItem(textItemId, "in_progress", ""),
+    });
+  }
+  const outputIndex = ctx.state.textOutputIndex as number;
+  const current = (ctx.state.accumulatedText as string) ?? "";
+  ctx.state.accumulatedText = current + text;
+  events.push({
+    type: "response.output_text.delta",
+    item_id: textItemId,
+    output_index: outputIndex,
+    content_index: 0,
+    delta: text,
+  });
+  return events;
+}
+
+function processInlineThinkDelta(
+  ctx: { state: Record<string, unknown> },
+  delta: string,
+  textItemId: string,
+  reasoningItemId: string,
+): Record<string, unknown>[] {
+  const mode = (ctx.state.inlineThinkMode as string) ?? "detecting";
+  let buffer = (ctx.state.inlineThinkBuffer as string) ?? "";
+
+  if (mode === "text") {
+    return emitTextDelta(ctx, delta, textItemId);
+  }
+
+  if (mode === "detecting") {
+    buffer += delta;
+    if (buffer.startsWith(THINK_OPEN_TAG)) {
+      ctx.state.inlineThinkMode = "reasoning";
+      ctx.state.inlineThinkBuffer = buffer;
+      return drainCompleteInlineThink(ctx, textItemId, reasoningItemId);
+    }
+    if (!THINK_OPEN_TAG.startsWith(buffer)) {
+      ctx.state.inlineThinkMode = "text";
+      ctx.state.inlineThinkBuffer = "";
+      return emitTextDelta(ctx, buffer, textItemId);
+    }
+    ctx.state.inlineThinkBuffer = buffer;
+    return [];
+  }
+
+  // mode === "reasoning"
+  buffer += delta;
+  ctx.state.inlineThinkBuffer = buffer;
+  return drainCompleteInlineThink(ctx, textItemId, reasoningItemId);
+}
+
+function drainCompleteInlineThink(
+  ctx: { state: Record<string, unknown> },
+  textItemId: string,
+  reasoningItemId: string,
+): Record<string, unknown>[] {
+  const buffer = (ctx.state.inlineThinkBuffer as string) ?? "";
+  const split = splitLeadingThinkBlock(buffer);
+  if (!split) return [];
+
+  ctx.state.inlineThinkMode = "text";
+  ctx.state.inlineThinkBuffer = "";
+
+  const events: Record<string, unknown>[] = [];
+  if (split.reasoning) {
+    const { events: reasoningEvents } = ensureReasoningOutputItem(ctx, reasoningItemId);
+    events.push(...reasoningEvents);
+    events.push(...emitReasoningDelta(ctx, split.reasoning, reasoningItemId));
+  }
+  if (split.answer) {
+    events.push(...emitTextDelta(ctx, split.answer, textItemId));
+  }
+  return events;
+}
+
+function flushInlineThink(
+  ctx: { state: Record<string, unknown> },
+  textItemId: string,
+  reasoningItemId: string,
+): Record<string, unknown>[] {
+  const mode = (ctx.state.inlineThinkMode as string) ?? "detecting";
+  const buffer = (ctx.state.inlineThinkBuffer as string) ?? "";
+  ctx.state.inlineThinkMode = "text";
+  ctx.state.inlineThinkBuffer = "";
+
+  if (mode === "text" || mode === "detecting") {
+    if (!buffer) return [];
+    return emitTextDelta(ctx, buffer, textItemId);
+  }
+
+  // mode === "reasoning"
+  const split = splitLeadingThinkBlock(buffer);
+  if (split) {
+    const events: Record<string, unknown>[] = [];
+    if (split.reasoning) {
+      events.push(...emitReasoningDelta(ctx, split.reasoning, reasoningItemId));
+    }
+    if (split.answer) {
+      events.push(...emitTextDelta(ctx, split.answer, textItemId));
+    }
+    return events;
+  }
+
+  // Unclosed think block: treat the buffered content (minus the opening tag if
+  // present) as trailing reasoning.
+  const reasoning = buffer.startsWith(THINK_OPEN_TAG)
+    ? buffer.slice(THINK_OPEN_TAG.length)
+    : buffer;
+  if (reasoning) {
+    return emitReasoningDelta(ctx, reasoning, reasoningItemId);
+  }
+  return [];
+}
+
 /**
  * Allocates the next output index for this response and returns it.
  * Output indices must be unique per output item (text, reasoning, function_call,
@@ -893,6 +1072,23 @@ export function translateChatStreamChunkToResponses(
   const accumulatedToolCalls = (ctx.state.accumulatedToolCalls as Record<number, Record<string, unknown>>) ?? {};
 
   // Usage-only chunk at the end of the stream: emit completion if we have not already done so.
+  if (chunk.error) {
+    const error = chunk.error as Record<string, unknown>;
+    ctx.state.completedEmitted = true;
+    return [
+      {
+        type: "response.failed",
+        response: {
+          error: {
+            message: typeof error.message === "string" ? error.message : String(error.message ?? JSON.stringify(error)),
+            type: typeof error.type === "string" ? error.type : "upstream_error",
+            code: error.code,
+          },
+        },
+      },
+    ];
+  }
+
   if (!firstChoice && chunk.usage !== undefined) {
     if (ctx.state.completedEmitted) return [];
     ctx.state.completedEmitted = true;
@@ -930,58 +1126,15 @@ export function translateChatStreamChunkToResponses(
   // Responses API reasoning item rather than dropping it.
   const reasoningText = typeof delta?.reasoning_content === "string" ? delta.reasoning_content : "";
   if (reasoningText) {
-    if (!ctx.state.reasoningOutputItemAdded) {
-      ctx.state.reasoningOutputItemAdded = true;
-      const outputIndex = allocateOutputIndex(ctx);
-      ctx.state.reasoningOutputIndex = outputIndex;
-      events.push({
-        type: "response.output_item.added",
-        output_index: outputIndex,
-        item: createReasoningItem(reasoningItemId, "in_progress"),
-      });
-      events.push({
-        type: "response.reasoning_summary_part.added",
-        item_id: reasoningItemId,
-        output_index: outputIndex,
-        summary_index: 0,
-        part: createSummaryTextPart(""),
-      });
-    }
-    const outputIndex = ctx.state.reasoningOutputIndex as number;
-    accumulatedReasoning += reasoningText;
-    ctx.state.accumulatedReasoning = accumulatedReasoning;
-    events.push({
-      type: "response.reasoning_summary_text.delta",
-      item_id: reasoningItemId,
-      output_index: outputIndex,
-      summary_index: 0,
-      delta: reasoningText,
-    });
+    events.push(...emitReasoningDelta(ctx, reasoningText, reasoningItemId));
   }
 
-  // Text delta for the assistant message.
+  // Text delta for the assistant message. Some providers (e.g., Qwen) embed
+  // reasoning in a leading <think>...</think> block inside the content stream;
+  // route that to a reasoning item instead of output text.
   const text = typeof delta?.content === "string" ? delta.content : "";
   if (text) {
-    if (!ctx.state.textOutputItemAdded) {
-      ctx.state.textOutputItemAdded = true;
-      const outputIndex = allocateOutputIndex(ctx);
-      ctx.state.textOutputIndex = outputIndex;
-      events.push({
-        type: "response.output_item.added",
-        output_index: outputIndex,
-        item: createAssistantItem(textItemId, "in_progress", ""),
-      });
-    }
-    const outputIndex = ctx.state.textOutputIndex as number;
-    accumulatedText += text;
-    ctx.state.accumulatedText = accumulatedText;
-    events.push({
-      type: "response.output_text.delta",
-      item_id: textItemId,
-      output_index: outputIndex,
-      content_index: 0,
-      delta: text,
-    });
+    events.push(...processInlineThinkDelta(ctx, text, textItemId, reasoningItemId));
   }
 
   // Tool call deltas are emitted incrementally by Kimi. Accumulate them and
@@ -1070,7 +1223,7 @@ export function translateChatStreamChunkToResponses(
           item_id: toolCallId,
           output_index: outputIndex,
           call_id: toolCallId,
-          arguments: toolCall.arguments,
+          arguments: canonicalizeToolArguments(toolCall.arguments),
         });
         events.push({
           type: "response.output_item.done",
@@ -1105,6 +1258,9 @@ export function translateChatStreamChunkToResponses(
         },
       ];
     }
+
+    // Any unclosed inline think block must be flushed before finalizing output items.
+    events.push(...flushInlineThink(ctx, textItemId, reasoningItemId));
 
     if (ctx.state.reasoningOutputItemAdded) {
       const outputIndex = ctx.state.reasoningOutputIndex as number;
@@ -1154,17 +1310,22 @@ export function translateChatStreamChunkToResponses(
 
     // Kimi puts usage inside the final choice, not as a separate chunk.
     const finishUsage = (chunk.usage ?? firstChoice?.usage) as Record<string, unknown> | undefined;
+    const completionStatus = responseStatusFromFinishReason(finishReason);
     if (!ctx.state.completedEmitted) {
       ctx.state.completedEmitted = true;
+      const response = createResponseObject(
+        responseId,
+        model,
+        createdAt,
+        completionStatus,
+        finishUsage !== undefined ? translateUsage(finishUsage) : null,
+      );
+      if (finishReason === "length") {
+        response.incomplete_details = { reason: "max_output_tokens" };
+      }
       events.push({
         type: "response.completed",
-        response: createResponseObject(
-          responseId,
-          model,
-          createdAt,
-          "completed",
-          finishUsage !== undefined ? translateUsage(finishUsage) : null,
-        ),
+        response,
       });
     }
   }
