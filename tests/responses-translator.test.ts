@@ -425,6 +425,131 @@ describe("responses-to-chat-completions translator", () => {
     expect(finalChunk?.some((e) => e.type === "response.completed")).toBe(true);
   });
 
+  it("drops streaming tool calls that never receive a function name", () => {
+    const ctx = { state: {} };
+    const originalBody = { model: "kimi-k2.7" };
+
+    translateChatStreamChunkToResponses(
+      ctx,
+      {
+        id: "chatcmpl-bad-tool",
+        created: 1234567890,
+        choices: [{ delta: { role: "assistant" } }],
+      },
+      originalBody,
+    );
+
+    const deltaChunk = translateChatStreamChunkToResponses(
+      ctx,
+      {
+        id: "chatcmpl-bad-tool",
+        created: 1234567890,
+        choices: [
+          {
+            delta: {
+              tool_calls: [{ index: 0, id: "call_bad", function: { arguments: "{}" } }],
+            },
+          },
+        ],
+      },
+      originalBody,
+    );
+    expect(deltaChunk?.some((e) => e.type === "response.output_item.added")).toBe(false);
+
+    const finalChunk = translateChatStreamChunkToResponses(
+      ctx,
+      {
+        id: "chatcmpl-bad-tool",
+        created: 1234567890,
+        choices: [{ delta: {}, finish_reason: "tool_calls" }],
+      },
+      originalBody,
+    );
+    expect(finalChunk?.some((e) => e.type === "response.output_item.done")).toBe(false);
+    const failed = finalChunk?.find((e) => e.type === "response.failed") as Record<string, unknown> | undefined;
+    expect(failed).toBeDefined();
+    expect(((failed?.response as Record<string, unknown>)?.error as Record<string, unknown>)?.type).toBe(
+      "upstream_tool_call_dropped",
+    );
+  });
+
+  it("emits a streaming tool call once its name arrives in a later delta", () => {
+    const ctx = { state: {} };
+    const originalBody = { model: "kimi-k2.7" };
+
+    translateChatStreamChunkToResponses(
+      ctx,
+      {
+        id: "chatcmpl-late-name",
+        created: 1234567890,
+        choices: [{ delta: { role: "assistant" } }],
+      },
+      originalBody,
+    );
+
+    const firstDelta = translateChatStreamChunkToResponses(
+      ctx,
+      {
+        id: "chatcmpl-late-name",
+        created: 1234567890,
+        choices: [{ delta: { tool_calls: [{ index: 0, id: "call_late", function: { arguments: "{}" } }] } }],
+      },
+      originalBody,
+    );
+    expect(firstDelta?.some((e) => e.type === "response.output_item.added")).toBe(false);
+
+    const nameDelta = translateChatStreamChunkToResponses(
+      ctx,
+      {
+        id: "chatcmpl-late-name",
+        created: 1234567890,
+        choices: [{ delta: { tool_calls: [{ index: 0, function: { name: "calculator" } }] } }],
+      },
+      originalBody,
+    );
+    const added = nameDelta?.find((e) => e.type === "response.output_item.added") as Record<string, unknown> | undefined;
+    expect(added).toBeDefined();
+    expect(((added?.item as Record<string, unknown>) ?? {}).name).toBe("calculator");
+
+    const finalChunk = translateChatStreamChunkToResponses(
+      ctx,
+      {
+        id: "chatcmpl-late-name",
+        created: 1234567890,
+        choices: [{ delta: {}, finish_reason: "tool_calls" }],
+      },
+      originalBody,
+    );
+    expect(finalChunk?.some((e) => e.type === "response.function_call_arguments.done")).toBe(true);
+    expect(finalChunk?.some((e) => e.type === "response.output_item.done")).toBe(true);
+  });
+
+  it("drops non-streaming tool calls with missing function names", () => {
+    const translated = translateChatResponseToResponses(
+      {
+        id: "chatcmpl-nonstream-bad",
+        created: 1234567890,
+        choices: [
+          {
+            message: {
+              role: "assistant",
+              tool_calls: [
+                { id: "call_good", function: { name: "calculator", arguments: "{}" } },
+                { id: "call_bad", function: { name: "", arguments: "{}" } },
+              ],
+            },
+            finish_reason: "tool_calls",
+          },
+        ],
+        usage: { prompt_tokens: 10, completion_tokens: 2, total_tokens: 12 },
+      },
+      { model: "kimi-k2.7" },
+    );
+    const output = (translated.output as Array<Record<string, unknown>>) ?? [];
+    expect(output).toHaveLength(1);
+    expect(output[0].name).toBe("calculator");
+  });
+
   it("includes prompt cache details in streaming usage", () => {
     const ctx = { state: { textOutputItemAdded: true, accumulatedText: "Hello" } };
     const translated = translateChatStreamChunkToResponses(

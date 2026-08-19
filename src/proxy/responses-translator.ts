@@ -495,11 +495,15 @@ export function translateChatResponseToResponses(
     // Responses API represents function calls as separate output items of type "function_call".
     for (const toolCall of toolCalls) {
       const fn = toolCall.function as Record<string, unknown> | undefined;
+      const name = (fn?.name as string | undefined) ?? "";
+      // Defensive: skip tool calls with missing/empty names (some models generate
+      // malformed tool calls). Mirrors cc-switch behavior.
+      if (name.trim().length === 0) continue;
       output.push({
         type: "function_call",
         id: toolCall.id as string | undefined,
         call_id: toolCall.id as string | undefined,
-        name: fn?.name as string | undefined,
+        name,
         arguments: fn?.arguments as string | undefined,
       });
     }
@@ -741,6 +745,11 @@ export function translateChatStreamChunkToResponses(
 
   // Tool call deltas are emitted incrementally by Kimi. Accumulate them and
   // translate to Responses API function_call events.
+  //
+  // Defensive: some upstream models emit tool_call deltas without a valid
+  // function name. We defer output_item.added until a non-empty name arrives;
+  // if the stream ends before that happens, the call is dropped and the
+  // response is failed when no usable tool call remains (mirrors cc-switch).
   const toolCallsDelta = delta?.tool_calls as Array<Record<string, unknown>> | undefined;
   if (toolCallsDelta && toolCallsDelta.length > 0) {
     for (const toolCall of toolCallsDelta) {
@@ -748,7 +757,8 @@ export function translateChatStreamChunkToResponses(
       const existing = accumulatedToolCalls[chatIndex] ?? {};
       const toolCallId = (toolCall.id as string) ?? (existing.id as string) ?? `${responseId}_tool_${chatIndex}`;
       const fn = toolCall.function as Record<string, unknown> | undefined;
-      const name = (fn?.name as string) ?? (existing.name as string);
+      const nameDelta = (fn?.name as string) ?? "";
+      const name = nameDelta || ((existing.name as string | undefined) ?? "");
       const argsDelta = fn?.arguments as string | undefined;
 
       let outputIndex: number;
@@ -763,11 +773,14 @@ export function translateChatStreamChunkToResponses(
         name,
         arguments: (existing.arguments as string | undefined ?? "") + (argsDelta ?? ""),
         outputIndex,
+        added: (existing.added as boolean | undefined) ?? false,
       };
 
+      // Only announce the tool call once we have a usable name.
       const addedKey = `toolCallAddedEmitted_${chatIndex}`;
-      if (!ctx.state[addedKey]) {
+      if (!ctx.state[addedKey] && name.trim().length > 0) {
         ctx.state[addedKey] = true;
+        accumulatedToolCalls[chatIndex].added = true;
         events.push({
           type: "response.output_item.added",
           output_index: outputIndex,
@@ -782,7 +795,7 @@ export function translateChatStreamChunkToResponses(
         });
       }
 
-      if (argsDelta) {
+      if (argsDelta && name.trim().length > 0) {
         events.push({
           type: "response.function_call_arguments.delta",
           item_id: toolCallId,
@@ -798,11 +811,17 @@ export function translateChatStreamChunkToResponses(
   // Finish reason means the output item(s) and response are complete.
   if (finishReason) {
     // Tool calls: emit done events sorted by the output_index they were assigned.
-    if (Object.keys(accumulatedToolCalls).length > 0) {
-      const sortedToolCalls = Object.values(accumulatedToolCalls).sort(
-        (a, b) => (a.outputIndex as number) - (b.outputIndex as number),
-      );
-      for (const toolCall of sortedToolCalls) {
+    // Skip any call that never received a valid name.
+    const sortedToolCalls = Object.values(accumulatedToolCalls).sort(
+      (a, b) => (a.outputIndex as number) - (b.outputIndex as number),
+    );
+    const usableToolCalls = sortedToolCalls.filter(
+      (tc) => typeof tc.name === "string" && tc.name.trim().length > 0 && tc.added,
+    );
+    const droppedToolCalls = sortedToolCalls.length - usableToolCalls.length;
+
+    if (usableToolCalls.length > 0) {
+      for (const toolCall of usableToolCalls) {
         const outputIndex = toolCall.outputIndex as number;
         const toolCallId = (toolCall.id as string) ?? `${responseId}_tool_${outputIndex}`;
         events.push({
@@ -825,6 +844,25 @@ export function translateChatStreamChunkToResponses(
           },
         });
       }
+    }
+
+    // If every tool call was dropped and the upstream signaled completion via
+    // tool_calls, fail the response rather than returning a confusing empty
+    // completed response (cc-switch behavior).
+    if (droppedToolCalls > 0 && usableToolCalls.length === 0 && finishReason === "tool_calls") {
+      ctx.state.completedEmitted = true;
+      return [
+        ...events,
+        {
+          type: "response.failed",
+          response: {
+            error: {
+              message: `Upstream returned ${droppedToolCalls} tool call(s) without a function name, leaving no usable tool call in this turn`,
+              type: "upstream_tool_call_dropped",
+            },
+          },
+        },
+      ];
     }
 
     if (ctx.state.reasoningOutputItemAdded) {
