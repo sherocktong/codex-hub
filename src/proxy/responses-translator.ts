@@ -106,6 +106,12 @@ function buildMessages(input: Array<Record<string, unknown>>): Array<Record<stri
     return true;
   };
 
+  const synthesizeToolCallForOutput = (callId: string): Record<string, unknown> => ({
+    id: callId,
+    type: "function",
+    function: { name: "unknown", arguments: "{}" },
+  });
+
   for (const item of input) {
     if (item.type === "function_call") {
       const toolCall = translateFunctionCall(item);
@@ -161,6 +167,24 @@ function buildMessages(input: Array<Record<string, unknown>>): Array<Record<stri
       appendReasoningToAssistant();
       const toolCallId = ((item.call_id as string) ?? (item.id as string)) || "";
       const output = item.output;
+
+      // Some upstream payloads contain function_call_output items without a
+      // matching function_call (orphan outputs). Kimi rejects tool messages whose
+      // tool_call_id does not correspond to a preceding assistant tool_calls
+      // entry, so synthesize a placeholder assistant message for the orphan.
+      if (toolCallId && !pendingToolCallIds.has(toolCallId)) {
+        const toolCall = synthesizeToolCallForOutput(toolCallId);
+        const message: Record<string, unknown> = {
+          role: "assistant",
+          content: null,
+          reasoning_content: "tool call",
+          tool_calls: [toolCall],
+        };
+        messages.push(message);
+        lastAssistantIndex = messages.length - 1;
+        pendingToolCallIds.add(toolCallId);
+      }
+
       messages.push({
         role: "tool",
         tool_call_id: toolCallId,

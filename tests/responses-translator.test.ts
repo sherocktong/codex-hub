@@ -613,4 +613,48 @@ describe("responses-to-chat-completions translator", () => {
     expect(textAdded?.output_index).toBe(0);
     expect(toolAdded?.output_index).toBe(1);
   });
+
+  it("synthesizes a matching assistant tool_calls entry for orphan function_call_output items", () => {
+    const result = translateResponsesRequestToChat(
+      {
+        model: "kimi-k2.7",
+        input: [
+          { type: "function_call_output", call_id: "call_orphan", output: "result" },
+        ],
+      },
+      provider,
+    );
+    expect(result.upstreamBody.messages).toEqual([
+      {
+        role: "assistant",
+        content: null,
+        reasoning_content: "tool call",
+        tool_calls: [
+          {
+            id: "call_orphan",
+            type: "function",
+            function: { name: "unknown", arguments: "{}" },
+          },
+        ],
+      },
+      { role: "tool", tool_call_id: "call_orphan", content: "result" },
+    ]);
+  });
+
+  it("synthesizes a placeholder tool_call_id for function_call_output missing call_id", () => {
+    const result = translateResponsesRequestToChat(
+      {
+        model: "kimi-k2.7",
+        input: [{ type: "function_call_output", id: "fc_out_1", output: "result" }],
+      },
+      provider,
+    );
+    expect(result.upstreamBody.messages).toHaveLength(2);
+    const assistantMsg = result.upstreamBody.messages[0] as Record<string, unknown>;
+    const toolMsg = result.upstreamBody.messages[1] as Record<string, unknown>;
+    expect(assistantMsg.role).toBe("assistant");
+    expect(toolMsg.role).toBe("tool");
+    expect(toolMsg.tool_call_id).toBe("fc_out_1");
+    expect((assistantMsg.tool_calls as Array<Record<string, unknown>>)[0].id).toBe("fc_out_1");
+  });
 });
