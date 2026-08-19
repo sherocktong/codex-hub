@@ -37,6 +37,176 @@ describe("responses-to-chat-completions translator", () => {
     expect(result.upstreamBody.model).toBe("kimi-k2-5-coding");
   });
 
+  it("converts instructions to a leading system message", () => {
+    const result = translateResponsesRequestToChat(
+      {
+        model: "kimi-k2.7",
+        instructions: [{ type: "text", text: "Be concise." }],
+        input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "hello" }] }],
+      },
+      provider,
+    );
+    expect(result.upstreamBody.messages).toEqual([
+      { role: "system", content: "Be concise." },
+      { role: "user", content: [{ type: "text", text: "hello" }] },
+    ]);
+  });
+
+  it("collapses system and developer messages into a single head system message", () => {
+    const result = translateResponsesRequestToChat(
+      {
+        model: "kimi-k2.7",
+        instructions: "First instruction.",
+        input: [
+          { type: "message", role: "developer", content: "Second instruction." },
+          { type: "message", role: "user", content: "hello" },
+          { type: "message", role: "system", content: "Third instruction." },
+        ],
+      },
+      provider,
+    );
+    expect(result.upstreamBody.messages).toEqual([
+      {
+        role: "system",
+        content: [
+          { type: "text", text: "First instruction." },
+          { type: "text", text: "Second instruction." },
+          { type: "text", text: "Third instruction." },
+        ],
+      },
+      { role: "user", content: "hello" },
+    ]);
+  });
+
+  it("maps max_output_tokens to max_tokens for non-o-series models", () => {
+    const result = translateResponsesRequestToChat(
+      {
+        model: "kimi-k2.7",
+        max_output_tokens: 4096,
+        input: [{ type: "message", role: "user", content: "hello" }],
+      },
+      provider,
+    );
+    expect(result.upstreamBody.max_output_tokens).toBeUndefined();
+    expect(result.upstreamBody.max_tokens).toBe(4096);
+  });
+
+  it("maps max_output_tokens to max_completion_tokens for o-series models", () => {
+    const result = translateResponsesRequestToChat(
+      {
+        model: "o3-mini",
+        max_output_tokens: 4096,
+        input: [{ type: "message", role: "user", content: "hello" }],
+      },
+      provider,
+    );
+    expect(result.upstreamBody.max_output_tokens).toBeUndefined();
+    expect(result.upstreamBody.max_completion_tokens).toBe(4096);
+    expect(result.upstreamBody.max_tokens).toBeUndefined();
+  });
+
+  it("passes through extra chat completion parameters", () => {
+    const result = translateResponsesRequestToChat(
+      {
+        model: "kimi-k2.7",
+        input: [{ type: "message", role: "user", content: "hello" }],
+        frequency_penalty: 0.5,
+        presence_penalty: 0.2,
+        seed: 42,
+        user: "test-user",
+      },
+      provider,
+    );
+    expect(result.upstreamBody.frequency_penalty).toBe(0.5);
+    expect(result.upstreamBody.presence_penalty).toBe(0.2);
+    expect(result.upstreamBody.seed).toBe(42);
+    expect(result.upstreamBody.user).toBe("test-user");
+  });
+
+  it("injects stream_options.include_usage for streaming requests", () => {
+    const result = translateResponsesRequestToChat(
+      {
+        model: "kimi-k2.7",
+        stream: true,
+        input: [{ type: "message", role: "user", content: "hello" }],
+      },
+      provider,
+    );
+    expect(result.upstreamBody.stream_options).toEqual({ include_usage: true });
+  });
+
+  it("preserves existing stream_options while adding include_usage", () => {
+    const result = translateResponsesRequestToChat(
+      {
+        model: "kimi-k2.7",
+        stream: true,
+        stream_options: { continuous_usage_stats: true },
+        input: [{ type: "message", role: "user", content: "hello" }],
+      },
+      provider,
+    );
+    expect(result.upstreamBody.stream_options).toEqual({ continuous_usage_stats: true, include_usage: true });
+  });
+
+  it("drops tool_choice and parallel_tool_calls when tools are empty", () => {
+    const result = translateResponsesRequestToChat(
+      {
+        model: "kimi-k2.7",
+        input: [{ type: "message", role: "user", content: "hello" }],
+        tool_choice: "auto",
+        parallel_tool_calls: true,
+      },
+      provider,
+    );
+    expect(result.upstreamBody.tool_choice).toBeUndefined();
+    expect(result.upstreamBody.parallel_tool_calls).toBeUndefined();
+  });
+
+  it("keeps tool_choice and parallel_tool_calls when tools are present", () => {
+    const result = translateResponsesRequestToChat(
+      {
+        model: "kimi-k2.7",
+        input: [{ type: "message", role: "user", content: "hello" }],
+        tools: [{ type: "function", name: "read_file", parameters: { type: "object" } }],
+        tool_choice: "auto",
+        parallel_tool_calls: true,
+      },
+      provider,
+    );
+    expect(result.upstreamBody.tool_choice).toBe("auto");
+    expect(result.upstreamBody.parallel_tool_calls).toBe(true);
+  });
+
+  it("canonicalizes function_call arguments", () => {
+    const result = translateResponsesRequestToChat(
+      {
+        model: "kimi-k2.7",
+        input: [
+          { type: "function_call", id: "call_1", name: "read_file", arguments: '{ "path": "/tmp" }' },
+        ],
+      },
+      provider,
+    );
+    const assistantMsg = result.upstreamBody.messages[0] as Record<string, unknown>;
+    const toolCalls = assistantMsg.tool_calls as Array<Record<string, unknown>>;
+    expect(((toolCalls[0].function as Record<string, unknown>).arguments as string)).toBe('{"path":"/tmp"}');
+  });
+
+  it("coerces empty function_call arguments to {}", () => {
+    const result = translateResponsesRequestToChat(
+      {
+        model: "kimi-k2.7",
+        input: [
+          { type: "function_call", id: "call_1", name: "read_file", arguments: "   " },
+        ],
+      },
+      provider,
+    );
+    const assistantMsg = result.upstreamBody.messages[0] as Record<string, unknown>;
+    const toolCalls = assistantMsg.tool_calls as Array<Record<string, unknown>>;
+    expect(((toolCalls[0].function as Record<string, unknown>).arguments as string)).toBe('{}');
+  });
+
   it("translates function_call_output input items to Chat Completions tool messages", () => {
     const result = translateResponsesRequestToChat(
       {

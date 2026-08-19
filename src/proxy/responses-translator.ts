@@ -8,6 +8,24 @@
 
 import type { ProviderConfig } from "../types.js";
 
+// Additional OpenAI Chat Completions parameters that should be passed through
+// from a Responses API request when present. Mirrors cc-switch's
+// EXTRA_CHAT_PASSTHROUGH_FIELDS.
+const EXTRA_CHAT_PASSTHROUGH_FIELDS = [
+  "frequency_penalty",
+  "logit_bias",
+  "logprobs",
+  "metadata",
+  "n",
+  "parallel_tool_calls",
+  "presence_penalty",
+  "seed",
+  "service_tier",
+  "stream_options",
+  "top_logprobs",
+  "user",
+];
+
 export interface TranslatedBodies {
   upstreamPath: string;
   upstreamBody: Record<string, unknown>;
@@ -25,8 +43,25 @@ export function translateResponsesRequestToChat(
   const upstreamBody: Record<string, unknown> = { ...body };
   delete upstreamBody.input;
 
+  const messages: Array<Record<string, unknown>> = [];
+
+  // OpenAI's Responses API uses `instructions` for system-level developer text.
+  // Chat Completions providers expect a leading system message.
+  const instructionsText = typeof body.instructions === "string"
+    ? body.instructions
+    : extractInstructionsText(body.instructions);
+  if (instructionsText) {
+    messages.push({ role: "system", content: instructionsText });
+  }
+
   const input = body.input as Array<Record<string, unknown>> | undefined;
-  upstreamBody.messages = Array.isArray(input) ? buildMessages(input) : [];
+  if (Array.isArray(input)) {
+    messages.push(...buildMessages(input));
+  }
+
+  // MiniMax and some other strict gateways reject intermediate system messages,
+  // so collapse all system/developer messages into a single head message.
+  upstreamBody.messages = collapseSystemMessagesToHead(messages);
 
   // Providers such as Kimi reject chat-completion requests whose messages array
   // is empty ("messages must not be empty"). Codex occasionally sends an empty
@@ -38,6 +73,29 @@ export function translateResponsesRequestToChat(
 
   // Copy common params that are shared between the two APIs.
   for (const key of ["model", "stream", "temperature", "top_p", "max_tokens", "stop"]) {
+    if (key in body) {
+      upstreamBody[key] = body[key];
+    }
+  }
+
+  // Responses API uses `max_output_tokens`; Chat Completions uses `max_tokens`
+  // (or `max_completion_tokens` for OpenAI o-series models).
+  const modelName = (upstreamBody.model as string) ?? "";
+  if ("max_output_tokens" in body) {
+    if (isOpenAIOSeries(modelName)) {
+      upstreamBody.max_completion_tokens = body.max_output_tokens;
+    } else {
+      upstreamBody.max_tokens = body.max_output_tokens;
+    }
+    delete upstreamBody.max_output_tokens;
+  }
+  if ("max_completion_tokens" in body) {
+    upstreamBody.max_completion_tokens = body.max_completion_tokens;
+  }
+
+  // Pass through additional OpenAI-compatible params that Responses API and Chat
+  // Completions share. Mirrors cc-switch's EXTRA_CHAT_PASSTHROUGH_FIELDS.
+  for (const key of EXTRA_CHAT_PASSTHROUGH_FIELDS) {
     if (key in body) {
       upstreamBody[key] = body[key];
     }
@@ -56,6 +114,24 @@ export function translateResponsesRequestToChat(
   }
   if (body.tool_choice !== undefined) {
     upstreamBody.tool_choice = convertToolChoice(body.tool_choice as string | Record<string, unknown>);
+  }
+
+  // Strict OpenAI-compatible upstreams (vLLM, enterprise gateways) reject
+  // requests that carry tool_choice or parallel_tool_calls without a non-empty
+  // tools array. Drop both fields when tools ended up absent or empty.
+  const toolsArray = upstreamBody.tools as Array<Record<string, unknown>> | undefined;
+  if (!Array.isArray(toolsArray) || toolsArray.length === 0) {
+    delete upstreamBody.tool_choice;
+    delete upstreamBody.parallel_tool_calls;
+  }
+
+  // OpenAI-compatible upstreams do not include usage in streaming SSE chunks by
+  // default. Explicitly request it so Kimi/Qianwen emit final usage chunks.
+  if (upstreamBody.stream === true) {
+    upstreamBody.stream_options = {
+      ...(upstreamBody.stream_options as Record<string, unknown> | undefined),
+      include_usage: true,
+    };
   }
 
   // Normalize model to a provider-supported model id.
@@ -267,6 +343,55 @@ function buildMessages(input: Array<Record<string, unknown>>): Array<Record<stri
   return messages;
 }
 
+function extractInstructionsText(instructions: unknown): string {
+  if (typeof instructions === "string") return instructions;
+  if (Array.isArray(instructions)) {
+    return instructions
+      .map((part: Record<string, unknown>) => (typeof part.text === "string" ? part.text : ""))
+      .filter(Boolean)
+      .join("\n\n");
+  }
+  return "";
+}
+
+function isOpenAIOSeries(model: string): boolean {
+  const lower = model.toLowerCase();
+  return lower.startsWith("o1") || lower.startsWith("o3") || lower.startsWith("o4");
+}
+
+function collapseSystemMessagesToHead(messages: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
+  const systemParts: Array<Record<string, unknown>> = [];
+  const collapsed: Array<Record<string, unknown>> = [];
+
+  for (const message of messages) {
+    if (message.role === "system") {
+      const content = message.content;
+      if (Array.isArray(content)) {
+        for (const part of content) {
+          if (part && typeof part === "object") {
+            systemParts.push(part as Record<string, unknown>);
+          }
+        }
+      } else if (typeof content === "string" && content) {
+        systemParts.push({ type: "text", text: content });
+      }
+      continue;
+    }
+    collapsed.push(message);
+  }
+
+  if (systemParts.length === 0) return collapsed;
+
+  // Keep a lone text system message as a plain string for compatibility with
+  // providers/tests that expect the simpler shape; only use the array form
+  // when there are multiple parts to merge.
+  const systemContent = systemParts.length === 1 && systemParts[0].type === "text"
+    ? systemParts[0].text
+    : systemParts;
+
+  return [{ role: "system", content: systemContent }, ...collapsed];
+}
+
 function translateFunctionCall(item: Record<string, unknown>): Record<string, unknown> {
   const toolCallId = ((item.call_id as string) ?? (item.id as string)) || "";
   return {
@@ -274,12 +399,23 @@ function translateFunctionCall(item: Record<string, unknown>): Record<string, un
     type: "function",
     function: {
       name: (item.name as string) ?? "",
-      arguments:
-        typeof item.arguments === "string"
-          ? item.arguments
-          : JSON.stringify(item.arguments ?? {}),
+      arguments: canonicalizeToolArguments(item.arguments),
     },
   };
+}
+
+function canonicalizeToolArguments(argumentsValue: unknown): string {
+  if (typeof argumentsValue === "string") {
+    const trimmed = argumentsValue.trim();
+    if (trimmed.length === 0) return "{}";
+    try {
+      const parsed = JSON.parse(trimmed);
+      return JSON.stringify(parsed);
+    } catch {
+      return trimmed;
+    }
+  }
+  return JSON.stringify(argumentsValue ?? {});
 }
 
 function extractReasoningText(item: Record<string, unknown>): string {
