@@ -623,48 +623,153 @@ export function translateChatResponseToResponses(
   const choices = chatResponse.choices as Array<Record<string, unknown>> | undefined;
   const firstChoice = choices?.[0];
   const message = firstChoice?.message as Record<string, unknown> | undefined;
+  const finishReason = firstChoice?.finish_reason as string | undefined;
   const content = message?.content;
   const toolCalls = message?.tool_calls as Array<Record<string, unknown>> | undefined;
+  const responseId = ((chatResponse.id as string) ?? "resp_0").toString().startsWith("resp_")
+    ? (chatResponse.id as string)
+    : `resp_${chatResponse.id}`;
+  const createdAt = (chatResponse.created as number) ?? Math.floor(Date.now() / 1000);
 
   const output: Array<Record<string, unknown>> = [];
+
+  // Some providers surface reasoning in a dedicated field; others embed it in a
+  // leading <think>...</think> block inside content. Surface either as a
+  // Responses API reasoning output item.
+  const reasoningText = extractChatReasoningText(message);
+  if (reasoningText) {
+    output.push({
+      id: `${responseId}_reasoning`,
+      type: "reasoning",
+      summary: [{ type: "summary_text", text: reasoningText }],
+    });
+  }
+
+  // Regular assistant message content, with any leading think block stripped so
+  // reasoning is not duplicated as output text.
+  const messageContent = buildResponseMessageContent(message);
+  if (messageContent) {
+    output.push({
+      type: "message",
+      role: "assistant",
+      content: messageContent,
+    });
+  }
+
+  // Responses API represents function calls as separate output items of type "function_call".
+  let droppedToolCallCount = 0;
   if (toolCalls && toolCalls.length > 0) {
-    // Responses API represents function calls as separate output items of type "function_call".
     for (const toolCall of toolCalls) {
       const fn = toolCall.function as Record<string, unknown> | undefined;
       const name = (fn?.name as string | undefined) ?? "";
       // Defensive: skip tool calls with missing/empty names (some models generate
       // malformed tool calls). Mirrors cc-switch behavior.
-      if (name.trim().length === 0) continue;
+      if (name.trim().length === 0) {
+        droppedToolCallCount++;
+        continue;
+      }
       output.push({
         type: "function_call",
         id: toolCall.id as string | undefined,
         call_id: toolCall.id as string | undefined,
         name,
-        arguments: fn?.arguments as string | undefined,
+        arguments: canonicalizeToolArguments(fn?.arguments),
       });
     }
   }
 
-  if (content !== undefined && (!Array.isArray(content) || content.length > 0)) {
-    const text = typeof content === "string" ? content : JSON.stringify(content);
-    if (text) {
-      output.push({
-        type: "message",
-        role: "assistant",
-        content: [{ type: "output_text", text }],
-      });
-    }
+  // If every tool call was dropped and the upstream signaled completion via
+  // tool_calls, fail the response rather than returning a confusing empty
+  // completed response (cc-switch behavior). Do not do this for truncation
+  // (finish_reason == "length") because the missing names are a consequence of
+  // truncation, not malformed upstream data.
+  const status = responseStatusFromFinishReason(finishReason);
+  if (status === "completed" && droppedToolCallCount > 0 && output.length === 0) {
+    return {
+      id: responseId,
+      object: "response",
+      created_at: createdAt,
+      status: "failed",
+      error: {
+        message: `Upstream returned ${droppedToolCallCount} tool call(s) without a function name, leaving no usable tool call in this turn`,
+        type: "upstream_tool_call_dropped",
+      },
+      model: originalBody.model,
+      output: [],
+      usage: translateUsage(chatResponse.usage as Record<string, unknown> | undefined),
+    };
   }
 
-  return {
-    id: chatResponse.id ?? "resp_0",
+  const response: Record<string, unknown> = {
+    id: responseId,
     object: "response",
-    created_at: chatResponse.created ?? Math.floor(Date.now() / 1000),
-    status: "completed",
+    created_at: createdAt,
+    status,
     model: originalBody.model,
     output,
     usage: translateUsage(chatResponse.usage as Record<string, unknown> | undefined),
   };
+
+  if (finishReason === "length") {
+    response.incomplete_details = { reason: "max_output_tokens" };
+  }
+
+  return response;
+}
+
+function responseStatusFromFinishReason(finishReason: string | undefined): string {
+  return finishReason === "length" ? "incomplete" : "completed";
+}
+
+function extractChatReasoningText(message: Record<string, unknown> | undefined): string | undefined {
+  if (!message) return undefined;
+  if (typeof message.reasoning_content === "string") {
+    const trimmed = message.reasoning_content.trim();
+    if (trimmed) return trimmed;
+  }
+  if (typeof message.content === "string") {
+    const split = splitLeadingThinkBlock(message.content);
+    if (split) return split.reasoning;
+  }
+  return undefined;
+}
+
+function splitLeadingThinkBlock(text: string): { reasoning: string; answer: string } | undefined {
+  const trimmed = text.trimStart();
+  if (!trimmed.startsWith("<think>")) return undefined;
+  const endIndex = trimmed.indexOf("</think>");
+  if (endIndex === -1) return undefined;
+  const reasoning = trimmed.slice("<think>".length, endIndex).trim();
+  const answer = trimmed.slice(endIndex + "</think>".length).trimStart();
+  return reasoning ? { reasoning, answer } : undefined;
+}
+
+function buildResponseMessageContent(message: Record<string, unknown> | undefined): Array<Record<string, unknown>> | undefined {
+  if (!message) return undefined;
+  let rawContent = message.content;
+  if (typeof rawContent === "string") {
+    const split = splitLeadingThinkBlock(rawContent);
+    if (split) {
+      rawContent = split.answer;
+    }
+    const text = (rawContent as string).trim();
+    if (!text) return undefined;
+    return [{ type: "output_text", text }];
+  }
+  if (Array.isArray(rawContent) && rawContent.length > 0) {
+    const parts: Array<Record<string, unknown>> = [];
+    for (const part of rawContent) {
+      if (part && typeof part === "object") {
+        const p = part as Record<string, unknown>;
+        if (p.type === "text" || p.type === "output_text") {
+          const text = String(p.text ?? "");
+          if (text) parts.push({ type: "output_text", text });
+        }
+      }
+    }
+    return parts.length > 0 ? parts : undefined;
+  }
+  return undefined;
 }
 
 export function translateUsage(usage: Record<string, unknown> | undefined): Record<string, unknown> {

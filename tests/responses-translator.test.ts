@@ -836,6 +836,106 @@ describe("responses-to-chat-completions translator", () => {
     expect(translated.status).toBe("completed");
   });
 
+  it("maps finish_reason length to incomplete status and details", () => {
+    const translated = translateChatResponseToResponses(
+      {
+        id: "chatcmpl-123",
+        object: "chat.completion",
+        model: "kimi-k2-5-coding",
+        choices: [{ message: { role: "assistant", content: "Hi" }, finish_reason: "length" }],
+      },
+      { model: "kimi-k2.7" },
+    );
+    expect(translated.status).toBe("incomplete");
+    expect(translated.incomplete_details).toEqual({ reason: "max_output_tokens" });
+  });
+
+  it("emits a reasoning output item from message reasoning_content", () => {
+    const translated = translateChatResponseToResponses(
+      {
+        id: "chatcmpl-123",
+        object: "chat.completion",
+        model: "kimi-k2-5-coding",
+        choices: [
+          {
+            message: { role: "assistant", reasoning_content: "Let me think.", content: "Answer." },
+          },
+        ],
+      },
+      { model: "kimi-k2.7" },
+    );
+    const output = translated.output as Array<Record<string, unknown>>;
+    expect(output).toHaveLength(2);
+    expect(output[0]).toMatchObject({
+      type: "reasoning",
+      summary: [{ type: "summary_text", text: "Let me think." }],
+    });
+    expect(output[1]).toMatchObject({
+      type: "message",
+      role: "assistant",
+      content: [{ type: "output_text", text: "Answer." }],
+    });
+  });
+
+  it("strips a leading think block into a reasoning output item", () => {
+    const translated = translateChatResponseToResponses(
+      {
+        id: "chatcmpl-123",
+        object: "chat.completion",
+        model: "kimi-k2-5-coding",
+        choices: [
+          {
+            message: {
+              role: "assistant",
+              content: "<think>Hidden reasoning</think>\nFinal answer.",
+            },
+          },
+        ],
+      },
+      { model: "kimi-k2.7" },
+    );
+    const output = translated.output as Array<Record<string, unknown>>;
+    expect(output).toHaveLength(2);
+    expect(output[0]).toMatchObject({
+      type: "reasoning",
+      summary: [{ type: "summary_text", text: "Hidden reasoning" }],
+    });
+    expect(output[1]).toMatchObject({
+      type: "message",
+      role: "assistant",
+      content: [{ type: "output_text", text: "Final answer." }],
+    });
+  });
+
+  it("canonicalizes non-streaming function_call arguments", () => {
+    const translated = translateChatResponseToResponses(
+      {
+        id: "chatcmpl-123",
+        object: "chat.completion",
+        model: "kimi-k2-5-coding",
+        choices: [
+          {
+            message: {
+              role: "assistant",
+              tool_calls: [
+                { id: "call_1", function: { name: "calculator", arguments: '{ "x": 1 }' } },
+              ],
+            },
+            finish_reason: "tool_calls",
+          },
+        ],
+      },
+      { model: "kimi-k2.7" },
+    );
+    const output = translated.output as Array<Record<string, unknown>>;
+    expect(output).toHaveLength(1);
+    expect(output[0]).toMatchObject({
+      type: "function_call",
+      name: "calculator",
+      arguments: '{"x":1}',
+    });
+  });
+
   it("translates reasoning_content to Responses reasoning events", () => {
     const ctx = { state: {} };
     const originalBody = { model: "kimi-k2.7" };
