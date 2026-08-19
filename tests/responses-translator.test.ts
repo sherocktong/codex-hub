@@ -37,6 +37,258 @@ describe("responses-to-chat-completions translator", () => {
     expect(result.upstreamBody.model).toBe("kimi-k2-5-coding");
   });
 
+  it("translates function_call_output input items to Chat Completions tool messages", () => {
+    const result = translateResponsesRequestToChat(
+      {
+        model: "kimi-k2.7",
+        input: [
+          { type: "function_call", call_id: "call_abc", name: "exec_command", arguments: "{\"cmd\":\"git status\"}" },
+          { type: "function_call_output", call_id: "call_abc", output: "On branch main" },
+        ],
+      },
+      provider,
+    );
+    expect(result.upstreamBody.messages).toEqual([
+      {
+        role: "assistant",
+        content: null,
+        reasoning_content: "tool call",
+        tool_calls: [
+          {
+            id: "call_abc",
+            type: "function",
+            function: { name: "exec_command", arguments: "{\"cmd\":\"git status\"}" },
+          },
+        ],
+      },
+      { role: "tool", tool_call_id: "call_abc", content: "On branch main" },
+    ]);
+  });
+
+  it("merges reasoning that appears between a function_call and its output into the assistant message", () => {
+    const result = translateResponsesRequestToChat(
+      {
+        model: "kimi-k2.7",
+        input: [
+          { type: "function_call", id: "call_abc", name: "exec_command", arguments: "{\"cmd\":\"ls\"}" },
+          { type: "reasoning", id: "r1", summary: [{ type: "summary_text", text: "Let me check the files." }] },
+          { type: "function_call_output", call_id: "call_abc", output: "file.txt" },
+        ],
+      },
+      provider,
+    );
+    expect(result.upstreamBody.messages).toEqual([
+      {
+        role: "assistant",
+        content: null,
+        reasoning_content: "Let me check the files.",
+        tool_calls: [
+          {
+            id: "call_abc",
+            type: "function",
+            function: { name: "exec_command", arguments: "{\"cmd\":\"ls\"}" },
+          },
+        ],
+      },
+      { role: "tool", tool_call_id: "call_abc", content: "file.txt" },
+    ]);
+  });
+
+  it("groups consecutive function_call items into a single assistant tool_calls message", () => {
+    const result = translateResponsesRequestToChat(
+      {
+        model: "kimi-k2.7",
+        input: [
+          { type: "function_call", id: "call_1", name: "read_file", arguments: "{\"path\":\"/etc/hosts\"}" },
+          { type: "function_call", id: "call_2", name: "read_file", arguments: "{\"path\":\"/etc/resolv.conf\"}" },
+          { type: "function_call_output", call_id: "call_1", output: "127.0.0.1 localhost" },
+          { type: "function_call_output", call_id: "call_2", output: "nameserver 8.8.8.8" },
+        ],
+      },
+      provider,
+    );
+    expect(result.upstreamBody.messages).toHaveLength(3);
+    const assistantMsg = result.upstreamBody.messages[0] as Record<string, unknown>;
+    expect(assistantMsg.role).toBe("assistant");
+    expect(assistantMsg.tool_calls).toHaveLength(2);
+  });
+
+  it("translates a function_call input item to an assistant tool_calls message", () => {
+    const result = translateResponsesRequestToChat(
+      {
+        model: "kimi-k2.7",
+        input: [
+          { type: "function_call", id: "call_xyz", name: "read_file", arguments: "{\"path\":\"/etc/hosts\"}" },
+        ],
+      },
+      provider,
+    );
+    expect(result.upstreamBody.messages).toEqual([
+      {
+        role: "assistant",
+        content: null,
+        reasoning_content: "tool call",
+        tool_calls: [
+          {
+            id: "call_xyz",
+            type: "function",
+            function: { name: "read_file", arguments: "{\"path\":\"/etc/hosts\"}" },
+          },
+        ],
+      },
+    ]);
+  });
+
+  it("merges a following assistant message into a pending tool_calls assistant message", () => {
+    const result = translateResponsesRequestToChat(
+      {
+        model: "kimi-k2.7",
+        input: [
+          { type: "function_call", id: "call_1", name: "exec_command", arguments: "{\"cmd\":\"ls\"}" },
+          { type: "message", role: "assistant", content: [{ type: "output_text", text: "Let me check." }] },
+          { type: "function_call_output", call_id: "call_1", output: "file.txt" },
+        ],
+      },
+      provider,
+    );
+    expect(result.upstreamBody.messages).toHaveLength(2);
+    const assistantMsg = result.upstreamBody.messages[0] as Record<string, unknown>;
+    expect(assistantMsg.role).toBe("assistant");
+    expect(assistantMsg.tool_calls).toHaveLength(1);
+    expect(assistantMsg.content).toEqual([{ type: "text", text: "Let me check." }]);
+    expect(result.upstreamBody.messages[1]).toEqual({
+      role: "tool",
+      tool_call_id: "call_1",
+      content: "file.txt",
+    });
+  });
+
+  it("merges embedded reasoning_content when merging an assistant message into a tool-call message", () => {
+    const result = translateResponsesRequestToChat(
+      {
+        model: "kimi-k2.7",
+        input: [
+          { type: "function_call", id: "call_1", name: "exec_command", arguments: "{\"cmd\":\"ls\"}" },
+          {
+            type: "message",
+            role: "assistant",
+            reasoning_content: "Let me check the files.",
+            content: [{ type: "output_text", text: "Checking." }],
+          },
+          { type: "function_call_output", call_id: "call_1", output: "file.txt" },
+        ],
+      },
+      provider,
+    );
+    expect(result.upstreamBody.messages).toHaveLength(2);
+    const assistantMsg = result.upstreamBody.messages[0] as Record<string, unknown>;
+    expect(assistantMsg.role).toBe("assistant");
+    expect(assistantMsg.tool_calls).toHaveLength(1);
+    expect(assistantMsg.content).toEqual([{ type: "text", text: "Checking." }]);
+    expect(assistantMsg.reasoning_content).toBe("Let me check the files.");
+  });
+
+  it("backfills reasoning_content for assistant tool-call messages without reasoning", () => {
+    const result = translateResponsesRequestToChat(
+      {
+        model: "kimi-k2.7",
+        input: [
+          { type: "function_call", call_id: "call_1", name: "read_file", arguments: "{\"path\":\"README.md\"}" },
+          { type: "function_call_output", call_id: "call_1", output: "Readme content" },
+        ],
+      },
+      provider,
+    );
+    const assistantMsg = result.upstreamBody.messages[0] as Record<string, unknown>;
+    expect(assistantMsg.role).toBe("assistant");
+    expect(assistantMsg.content).toBeNull();
+    expect(assistantMsg.reasoning_content).toBe("tool call");
+  });
+
+  it("preserves reasoning_content on input assistant messages", () => {
+    const result = translateResponsesRequestToChat(
+      {
+        model: "kimi-k2.7",
+        input: [
+          {
+            type: "message",
+            role: "assistant",
+            reasoning_content: "I need to preserve thinking history.",
+            content: [{ type: "output_text", text: "Done." }],
+          },
+        ],
+      },
+      provider,
+    );
+    expect(result.upstreamBody.messages).toEqual([
+      {
+        role: "assistant",
+        reasoning_content: "I need to preserve thinking history.",
+        content: [{ type: "text", text: "Done." }],
+      },
+    ]);
+  });
+
+  it("attaches reasoning items as reasoning_content on assistant messages", () => {
+    const result = translateResponsesRequestToChat(
+      {
+        model: "kimi-k2.7",
+        input: [
+          {
+            type: "reasoning",
+            summary: [{ type: "summary_text", text: "Need to inspect the repo." }],
+          },
+          {
+            type: "message",
+            role: "assistant",
+            content: [{ type: "output_text", text: "I will check the files." }],
+          },
+        ],
+      },
+      provider,
+    );
+    expect(result.upstreamBody.messages).toEqual([
+      {
+        role: "assistant",
+        reasoning_content: "Need to inspect the repo.",
+        content: [{ type: "text", text: "I will check the files." }],
+      },
+    ]);
+  });
+
+  it("attaches trailing reasoning to the previous assistant before a user turn", () => {
+    const result = translateResponsesRequestToChat(
+      {
+        model: "kimi-k2.7",
+        input: [
+          {
+            type: "message",
+            role: "assistant",
+            content: "I checked the files.",
+          },
+          {
+            type: "reasoning",
+            summary: [{ type: "summary_text", text: "The answer came from README." }],
+          },
+          {
+            type: "message",
+            role: "user",
+            content: "Continue",
+          },
+        ],
+      },
+      provider,
+    );
+    expect(result.upstreamBody.messages).toEqual([
+      {
+        role: "assistant",
+        content: "I checked the files.",
+        reasoning_content: "The answer came from README.",
+      },
+      { role: "user", content: "Continue" },
+    ]);
+  });
+
   it("translates a chat completion response", () => {
     const translated = translateChatResponseToResponses(
       {

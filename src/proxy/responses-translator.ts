@@ -26,7 +26,7 @@ export function translateResponsesRequestToChat(
   delete upstreamBody.input;
 
   const input = body.input as Array<Record<string, unknown>> | undefined;
-  upstreamBody.messages = Array.isArray(input) ? input.map(translateInputItem) : [];
+  upstreamBody.messages = Array.isArray(input) ? buildMessages(input) : [];
 
   // Providers such as Kimi reject chat-completion requests whose messages array
   // is empty ("messages must not be empty"). Codex occasionally sends an empty
@@ -68,6 +68,264 @@ export function translateResponsesRequestToChat(
   };
 }
 
+function buildMessages(input: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
+  const messages: Array<Record<string, unknown>> = [];
+  const pendingToolCallIds = new Set<string>();
+  const pendingReasoning: string[] = [];
+  let lastAssistantIndex = -1;
+
+  const appendPendingReasoning = (text: string): void => {
+    const trimmed = text.trim();
+    if (!trimmed) return;
+    pendingReasoning.push(trimmed);
+  };
+
+  const consumePendingReasoning = (): string | undefined => {
+    if (pendingReasoning.length === 0) return undefined;
+    const text = pendingReasoning.join("\n\n");
+    pendingReasoning.length = 0;
+    return text || undefined;
+  };
+
+  const attachReasoningToMessage = (msg: Record<string, unknown>, reasoning: string): void => {
+    const existing = msg.reasoning_content as string | undefined;
+    if (typeof existing === "string" && existing.trim()) {
+      msg.reasoning_content = `${existing.trim()}\n\n${reasoning}`;
+    } else {
+      msg.reasoning_content = reasoning;
+    }
+  };
+
+  const appendReasoningToAssistant = (): boolean => {
+    const reasoning = consumePendingReasoning();
+    if (!reasoning) return false;
+    if (lastAssistantIndex < 0) return false;
+    const msg = messages[lastAssistantIndex];
+    if (msg.role !== "assistant") return false;
+    attachReasoningToMessage(msg, reasoning);
+    return true;
+  };
+
+  for (const item of input) {
+    if (item.type === "function_call") {
+      const toolCall = translateFunctionCall(item);
+      const toolCallId = (toolCall.id as string) ?? "";
+
+      // Some function_call items carry embedded reasoning that belongs to this
+      // tool-call turn; accumulate it so it can be attached as reasoning_content.
+      if (typeof item.reasoning_content === "string") {
+        appendPendingReasoning(item.reasoning_content);
+      }
+
+      if (
+        lastAssistantIndex >= 0 &&
+        messages[lastAssistantIndex].role === "assistant" &&
+        pendingToolCallIds.size > 0
+      ) {
+        const existing = messages[lastAssistantIndex].tool_calls as Array<Record<string, unknown>> | undefined;
+        if (existing) {
+          existing.push(toolCall);
+          pendingToolCallIds.add(toolCallId);
+          appendReasoningToAssistant();
+          continue;
+        }
+      }
+
+      // Start a new assistant message for this batch of tool calls.
+      const reasoning = consumePendingReasoning();
+      const message: Record<string, unknown> = {
+        role: "assistant",
+        content: null,
+        tool_calls: [toolCall],
+      };
+      if (reasoning) {
+        message.reasoning_content = reasoning;
+      }
+      messages.push(message);
+      lastAssistantIndex = messages.length - 1;
+      pendingToolCallIds.clear();
+      pendingToolCallIds.add(toolCallId);
+      continue;
+    }
+
+    if (item.type === "reasoning") {
+      const text = extractReasoningText(item);
+      if (text) appendPendingReasoning(text);
+      continue;
+    }
+
+    if (item.type === "function_call_output") {
+      // Attach any trailing reasoning to the pending tool-call assistant message
+      // before emitting the tool response; Kimi expects reasoning_content on
+      // assistant tool-call turns and tool messages immediately after.
+      appendReasoningToAssistant();
+      const toolCallId = ((item.call_id as string) ?? (item.id as string)) || "";
+      const output = item.output;
+      messages.push({
+        role: "tool",
+        tool_call_id: toolCallId,
+        content: typeof output === "string" ? output : JSON.stringify(output ?? ""),
+      });
+      pendingToolCallIds.delete(toolCallId);
+      continue;
+    }
+
+    if (item.type === "message" && item.role === "assistant") {
+      const translated = translateAssistantMessage(item);
+
+      // If there are unresolved assistant tool_calls from earlier, append this
+      // assistant text/reasoning onto that same assistant message so tool results
+      // remain immediately adjacent to their tool_calls.
+      if (
+        pendingToolCallIds.size > 0 &&
+        lastAssistantIndex >= 0 &&
+        messages[lastAssistantIndex].role === "assistant" &&
+        translated.content &&
+        !translated.tool_calls
+      ) {
+        const target = messages[lastAssistantIndex];
+        const existingContent = target.content;
+        if (Array.isArray(existingContent)) {
+          (existingContent as Array<Record<string, unknown>>).push(
+            ...(Array.isArray(translated.content)
+              ? (translated.content as Array<Record<string, unknown>>)
+              : [{ type: "text", text: translated.content }]),
+          );
+        } else if (typeof existingContent === "string") {
+          target.content = `${existingContent}\n${String(translated.content)}`;
+        } else {
+          target.content = translated.content;
+        }
+        // Merge the assistant message's own reasoning_content (if any) and any
+        // pending reasoning into the target tool-call message.
+        if (typeof translated.reasoning_content === "string") {
+          appendPendingReasoning(translated.reasoning_content);
+        }
+        appendReasoningToAssistant();
+        continue;
+      }
+
+      // Pending reasoning for a standalone assistant message becomes its
+      // reasoning_content rather than being lost.
+      const reasoning = consumePendingReasoning();
+      if (reasoning) attachReasoningToMessage(translated, reasoning);
+      messages.push(translated);
+      lastAssistantIndex = messages.length - 1;
+      pendingToolCallIds.clear();
+      const ids = extractToolCallIds(translated);
+      for (const id of ids) pendingToolCallIds.add(id);
+      continue;
+    }
+
+    // Non-assistant turn boundaries: do not let reasoning leak across user/system
+    // turns; attach it to the previous assistant if one exists.
+    appendReasoningToAssistant();
+
+    const msg = translateInputItem(item);
+    messages.push(msg);
+
+    if (msg.role === "assistant") {
+      lastAssistantIndex = messages.length - 1;
+      pendingToolCallIds.clear();
+      const ids = extractToolCallIds(msg);
+      for (const id of ids) pendingToolCallIds.add(id);
+    } else {
+      lastAssistantIndex = -1;
+      pendingToolCallIds.clear();
+    }
+  }
+
+  // Any reasoning left at the end of the input is trailing reasoning for the
+  // last assistant turn.
+  appendReasoningToAssistant();
+
+  backfillToolCallReasoningPlaceholders(messages);
+  return messages;
+}
+
+function translateFunctionCall(item: Record<string, unknown>): Record<string, unknown> {
+  const toolCallId = ((item.call_id as string) ?? (item.id as string)) || "";
+  return {
+    id: toolCallId,
+    type: "function",
+    function: {
+      name: (item.name as string) ?? "",
+      arguments:
+        typeof item.arguments === "string"
+          ? item.arguments
+          : JSON.stringify(item.arguments ?? {}),
+    },
+  };
+}
+
+function extractReasoningText(item: Record<string, unknown>): string {
+  if (typeof item.content === "string") return item.content;
+  const summary = item.summary;
+  if (Array.isArray(summary)) {
+    return summary
+      .map((part: Record<string, unknown>) => (typeof part.text === "string" ? part.text : ""))
+      .join("");
+  }
+  return "";
+}
+
+function extractToolCallIds(msg: Record<string, unknown>): string[] {
+  const toolCalls = msg.tool_calls as Array<Record<string, unknown>> | undefined;
+  if (!Array.isArray(toolCalls)) return [];
+  return toolCalls
+    .map((toolCall) => ((toolCall.id ?? toolCall.call_id) as string | undefined) ?? "")
+    .filter(Boolean);
+}
+
+function translateAssistantMessage(item: Record<string, unknown>): Record<string, unknown> {
+  const content = item.content;
+  const translated: Record<string, unknown> = { role: "assistant" };
+
+  // Preserve tool_calls and reasoning_content that may already be present on
+  // assistant messages (e.g. from a previous turn's history).
+  if (item.tool_calls) {
+    translated.tool_calls = item.tool_calls;
+  }
+  if (typeof item.reasoning_content === "string") {
+    translated.reasoning_content = item.reasoning_content;
+  }
+
+  const translatedContent = translateContent(content);
+  if (
+    (Array.isArray(translatedContent) && translatedContent.length === 0) ||
+    translatedContent === ""
+  ) {
+    // Assistant tool-call messages must have content: null; plain assistant
+    // messages need a harmless filler so providers reject empty content.
+    translated.content = translated.tool_calls ? null : "​";
+  } else {
+    translated.content = translatedContent;
+  }
+
+  return translated;
+}
+
+function backfillToolCallReasoningPlaceholders(messages: Array<Record<string, unknown>>): void {
+  for (const message of messages) {
+    const toolCalls = message.tool_calls as Array<Record<string, unknown>> | undefined;
+    if (
+      message.role !== "assistant" ||
+      !Array.isArray(toolCalls) ||
+      toolCalls.length === 0
+    ) {
+      continue;
+    }
+
+    const existing = message.reasoning_content as string | undefined;
+    if (typeof existing !== "string" || !existing.trim()) {
+      // Kimi/Moonshot/DeepSeek thinking models require every assistant message
+      // that carries tool_calls to have non-empty reasoning_content. Use a
+      // minimal placeholder when no real reasoning was preserved.
+      message.reasoning_content = "tool call";
+    }
+  }
+}
+
 function translateInputItem(item: Record<string, unknown>): Record<string, unknown> {
   // A compaction item carries an opaque summary blob produced by a previous
   // /v1/responses/compact call. Present it to the Chat Completions model as a
@@ -86,20 +344,23 @@ function translateInputItem(item: Record<string, unknown>): Record<string, unkno
     const content = item.content;
     const translated: Record<string, unknown> = { role };
 
-    // Preserve tool_calls for assistant messages; Kimi accepts empty-string content
-    // as long as tool_calls are present and followed by tool messages.
+    // Preserve tool_calls and reasoning_content for assistant messages.
     if (item.tool_calls) {
       translated.tool_calls = item.tool_calls;
+    }
+    if (role === "assistant" && typeof item.reasoning_content === "string") {
+      translated.reasoning_content = item.reasoning_content;
     }
 
     const translatedContent = translateContent(content);
     // Kimi rejects messages whose content is an empty array or empty string
-    // ("must not be empty"). Use a single zero-width space as a harmless filler.
+    // ("must not be empty"). Use a single zero-width space as a harmless filler,
+    // except for assistant messages with tool_calls, which must use content: null.
     if (
       (Array.isArray(translatedContent) && translatedContent.length === 0) ||
       translatedContent === ""
     ) {
-      translated.content = "​";
+      translated.content = translated.tool_calls ? null : "​";
     } else {
       translated.content = translatedContent;
     }
