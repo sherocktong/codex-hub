@@ -94,7 +94,7 @@ export function generateDefaultBaseConfig(): string {
 export function generateNativeProfileContent(
   name: string,
   data: {
-    model?: string;
+    models?: string[];
     modelProvider: string;
     openaiBaseUrl: string;
   },
@@ -105,8 +105,10 @@ export function generateNativeProfileContent(
     `model_provider = "${escapeTomlString(data.modelProvider)}"`,
     `openai_base_url = "${escapeTomlString(data.openaiBaseUrl)}"`,
   ];
-  if (data.model) {
-    lines.push(`model = "${escapeTomlString(data.model)}"`);
+  const models = data.models ?? [];
+  if (models.length > 0) {
+    lines.push(`model = "${escapeTomlString(models[0])}"`);
+    lines.push(`models = ${toTomlArray(models)}`);
   }
   return lines.join("\n") + "\n";
 }
@@ -301,10 +303,15 @@ export async function syncNativeProfile(
   // The profile file only needs the codex-hub routing keys. Codex CLI layers
   // this file on top of config.toml, so shared defaults (theme, MCP servers,
   // project trust levels) remain in config.toml and are not duplicated here.
+  const models = profile.models?.length
+    ? profile.models
+    : profile.model
+      ? [profile.model]
+      : [];
   let content = generateNativeProfileContent(name, {
     modelProvider: "openai",
     openaiBaseUrl: baseUrl,
-    model: profile.models?.[0] || profile.model,
+    models,
   });
 
   // Chat-Completions providers must have remote_compaction_v2 disabled.
