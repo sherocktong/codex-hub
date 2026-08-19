@@ -21,6 +21,7 @@ export interface ProxyInstanceConfig {
 export interface RequestContext {
   profileName: string;
   provider: ProviderConfig;
+  failoverQueue: ProviderConfig[];
   request: Request;
   body: Record<string, unknown>;
   path: string;

@@ -1,4 +1,5 @@
-import type { CircuitBreakerConfig, CircuitState } from "./types.js";
+import type { CircuitBreakerConfig } from "./types.js";
+import type { CircuitState } from "../types.js";
 
 interface BreakerStats {
   state: CircuitState;

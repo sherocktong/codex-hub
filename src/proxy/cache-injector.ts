@@ -44,13 +44,13 @@ function injectQwenCacheMarkers(body: Record<string, unknown>): void {
   }
 
   // Work on a shallow copy so we do not mutate the caller's message objects.
-  const messages = rawMessages.map((message) => ({
+  const messages: ChatMessage[] = rawMessages.map((message) => ({
     ...message,
-    content: cloneContent(message.content),
+    content: cloneContent(message.content) as ChatMessage["content"],
   }));
   body.messages = messages;
 
-  const existingMarkers = countExistingCacheControls(messages);
+  const existingMarkers = countExistingCacheControls({ messages });
   if (existingMarkers >= MAX_CACHE_MARKERS) {
     logger.debug(`qianwen cache: ${existingMarkers} existing markers, skipping injection`);
     return;
@@ -98,16 +98,16 @@ function injectQwenCacheMarkers(body: Record<string, unknown>): void {
   );
 }
 
-function cloneContent(content: unknown): unknown {
+function cloneContent(content: unknown): ChatMessage["content"] {
   if (typeof content === "string") {
     return content;
   }
   if (Array.isArray(content)) {
     return content.map((block) =>
       block && typeof block === "object" ? { ...(block as Record<string, unknown>) } : block,
-    );
+    ) as ContentBlock[];
   }
-  return content;
+  return content as ChatMessage["content"];
 }
 
 function findLastUserIndex(messages: ChatMessage[]): number {

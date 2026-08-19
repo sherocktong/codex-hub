@@ -251,4 +251,114 @@ describe("responses-to-chat-completions translator", () => {
     ]);
     expect(result.upstreamBody.tool_choice).toEqual({ type: "function", function: { name: "exec_command" } });
   });
+
+  it("translates response_format to Chat Completions shape", () => {
+    const result = translateResponsesRequestToChat(
+      {
+        model: "kimi-k2.7",
+        input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "hello" }] }],
+        response_format: {
+          type: "json_schema",
+          name: "greeting",
+          schema: { type: "object", properties: { text: { type: "string" } } },
+          strict: true,
+        },
+      },
+      provider,
+    );
+    expect(result.upstreamBody.response_format).toEqual({
+      type: "json_schema",
+      json_schema: {
+        name: "greeting",
+        schema: { type: "object", properties: { text: { type: "string" } } },
+        strict: true,
+      },
+    });
+  });
+
+  it("includes status in translated non-streaming response", () => {
+    const translated = translateChatResponseToResponses(
+      {
+        id: "chatcmpl-123",
+        object: "chat.completion",
+        model: "kimi-k2-5-coding",
+        choices: [{ message: { role: "assistant", content: "Hi there" } }],
+      },
+      { model: "kimi-k2.7" },
+    );
+    expect(translated.status).toBe("completed");
+  });
+
+  it("translates reasoning_content to Responses reasoning events", () => {
+    const ctx = { state: {} };
+    const originalBody = { model: "kimi-k2.7" };
+
+    const firstChunk = translateChatStreamChunkToResponses(
+      ctx,
+      {
+        id: "chatcmpl-reason",
+        created: 1234567890,
+        choices: [{ delta: { role: "assistant", reasoning_content: "Let me think." } }],
+      },
+      originalBody,
+    );
+    expect(firstChunk?.[0].type).toBe("response.created");
+    expect(firstChunk?.some((e) => e.type === "response.output_item.added")).toBe(true);
+    expect(firstChunk?.some((e) => e.type === "response.reasoning_summary_part.added")).toBe(true);
+    expect(firstChunk?.some((e) => e.type === "response.reasoning_summary_text.delta")).toBe(true);
+
+    const finalChunk = translateChatStreamChunkToResponses(
+      ctx,
+      {
+        id: "chatcmpl-reason",
+        created: 1234567890,
+        choices: [{ delta: {}, finish_reason: "stop" }],
+      },
+      originalBody,
+    );
+    expect(finalChunk?.some((e) => e.type === "response.reasoning_summary_text.done")).toBe(true);
+    expect(finalChunk?.some((e) => e.type === "response.output_item.done")).toBe(true);
+    expect(finalChunk?.some((e) => e.type === "response.completed")).toBe(true);
+  });
+
+  it("allocates distinct output indices for text and tool calls", () => {
+    const ctx = { state: {} };
+    const originalBody = { model: "kimi-k2.7" };
+
+    const textChunk = translateChatStreamChunkToResponses(
+      ctx,
+      {
+        id: "chatcmpl-mixed",
+        created: 1234567890,
+        choices: [{ delta: { role: "assistant", content: "I will run a command." } }],
+      },
+      originalBody,
+    );
+
+    const toolChunk = translateChatStreamChunkToResponses(
+      ctx,
+      {
+        id: "chatcmpl-mixed",
+        created: 1234567890,
+        choices: [
+          {
+            delta: {
+              tool_calls: [{ index: 0, id: "call_1", type: "function", function: { name: "exec_command" } }],
+            },
+          },
+        ],
+      },
+      originalBody,
+    );
+
+    const textAdded = textChunk?.find(
+      (e) => e.type === "response.output_item.added" && (e.item as Record<string, unknown>)?.type === "message",
+    ) as Record<string, unknown> | undefined;
+    const toolAdded = toolChunk?.find(
+      (e) => e.type === "response.output_item.added" && (e.item as Record<string, unknown>)?.type === "function_call",
+    ) as Record<string, unknown> | undefined;
+
+    expect(textAdded?.output_index).toBe(0);
+    expect(toolAdded?.output_index).toBe(1);
+  });
 });

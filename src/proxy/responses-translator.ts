@@ -43,6 +43,13 @@ export function translateResponsesRequestToChat(
     }
   }
 
+  // Convert response_format from Responses API shape to Chat Completions shape.
+  // Responses: { type: "json_schema", name, schema, strict }
+  // Chat:     { type: "json_schema", json_schema: { name, schema, strict } }
+  if (body.response_format) {
+    upstreamBody.response_format = convertResponseFormat(body.response_format as Record<string, unknown>);
+  }
+
   // Convert tools from Responses API format to Chat Completions format.
   if (body.tools) {
     upstreamBody.tools = convertTools(body.tools as Array<Record<string, unknown>>);
@@ -172,6 +179,22 @@ function convertToolChoice(toolChoice: string | Record<string, unknown>): string
   return toolChoice;
 }
 
+function convertResponseFormat(responseFormat: Record<string, unknown>): Record<string, unknown> {
+  if (responseFormat.type !== "json_schema") {
+    return responseFormat;
+  }
+  const { type, name, schema, strict, ...rest } = responseFormat;
+  return {
+    type,
+    json_schema: {
+      name,
+      schema,
+      strict,
+      ...rest,
+    },
+  };
+}
+
 export function translateChatResponseToResponses(
   chatResponse: Record<string, unknown>,
   originalBody: Record<string, unknown>,
@@ -212,6 +235,7 @@ export function translateChatResponseToResponses(
     id: chatResponse.id ?? "resp_0",
     object: "response",
     created_at: chatResponse.created ?? Math.floor(Date.now() / 1000),
+    status: "completed",
     model: originalBody.model,
     output,
     usage: translateUsage(chatResponse.usage as Record<string, unknown> | undefined),
@@ -293,6 +317,30 @@ function createOutputTextPart(text: string): Record<string, unknown> {
   return { type: "output_text", text: text ?? "" };
 }
 
+function createReasoningItem(itemId: string, status: string, summaryText = ""): Record<string, unknown> {
+  return {
+    id: itemId,
+    type: "reasoning",
+    status,
+    summary: [{ type: "summary_text", text: summaryText }],
+  };
+}
+
+function createSummaryTextPart(text: string): Record<string, unknown> {
+  return { type: "summary_text", text: text ?? "" };
+}
+
+/**
+ * Allocates the next output index for this response and returns it.
+ * Output indices must be unique per output item (text, reasoning, function_call,
+ * etc.) in the order they first appear.
+ */
+function allocateOutputIndex(ctx: { state: Record<string, unknown> }): number {
+  const next = (ctx.state.nextOutputIndex as number) ?? 0;
+  ctx.state.nextOutputIndex = next + 1;
+  return next;
+}
+
 /**
  * Translates a Chat Completions SSE chunk into the OpenAI Responses API event
  * sequence that Codex CLI expects.
@@ -305,11 +353,13 @@ export function translateChatStreamChunkToResponses(
   const choices = chunk.choices as Array<Record<string, unknown>> | undefined;
   const firstChoice = choices?.[0];
   const responseId = (chunk.id as string) ?? "resp_0";
-  const itemId = `${responseId}_item`;
+  const textItemId = `${responseId}_item`;
+  const reasoningItemId = `${responseId}_reasoning`;
   const model = (originalBody.model as string) ?? "";
   const createdAt = (chunk.created as number) ?? Math.floor(Date.now() / 1000);
 
   let accumulatedText = (ctx.state.accumulatedText as string) ?? "";
+  let accumulatedReasoning = (ctx.state.accumulatedReasoning as string) ?? "";
   const accumulatedToolCalls = (ctx.state.accumulatedToolCalls as Record<number, Record<string, unknown>>) ?? {};
 
   // Usage-only chunk at the end of the stream: emit completion if we have not already done so.
@@ -330,14 +380,52 @@ export function translateChatStreamChunkToResponses(
   const finishReason = firstChoice.finish_reason as string | undefined;
   const events: Record<string, unknown>[] = [];
 
-  // The first assistant delta marks the start of the response. We deliberately do
-  // not add an output item here; we wait until we know whether the model is
-  // emitting text or a function call.
-  if (delta?.role === "assistant" && !ctx.state.responseCreatedEmitted) {
+  // Some providers omit the role on the first delta, so treat any assistant-like
+  // content (text, reasoning, or tool calls) as the start of the response.
+  const isAssistantDelta =
+    delta?.role === "assistant" ||
+    typeof delta?.content === "string" ||
+    typeof delta?.reasoning_content === "string" ||
+    (Array.isArray(delta?.tool_calls) && (delta.tool_calls as Array<Record<string, unknown>>).length > 0);
+
+  if (isAssistantDelta && !ctx.state.responseCreatedEmitted) {
     ctx.state.responseCreatedEmitted = true;
     events.push({
       type: "response.created",
       response: createResponseObject(responseId, model, createdAt, "in_progress", null),
+    });
+  }
+
+  // Reasoning delta for thinking-style models (Kimi/Qwen). Preserve it as a
+  // Responses API reasoning item rather than dropping it.
+  const reasoningText = typeof delta?.reasoning_content === "string" ? delta.reasoning_content : "";
+  if (reasoningText) {
+    if (!ctx.state.reasoningOutputItemAdded) {
+      ctx.state.reasoningOutputItemAdded = true;
+      const outputIndex = allocateOutputIndex(ctx);
+      ctx.state.reasoningOutputIndex = outputIndex;
+      events.push({
+        type: "response.output_item.added",
+        output_index: outputIndex,
+        item: createReasoningItem(reasoningItemId, "in_progress"),
+      });
+      events.push({
+        type: "response.reasoning_summary_part.added",
+        item_id: reasoningItemId,
+        output_index: outputIndex,
+        summary_index: 0,
+        part: createSummaryTextPart(""),
+      });
+    }
+    const outputIndex = ctx.state.reasoningOutputIndex as number;
+    accumulatedReasoning += reasoningText;
+    ctx.state.accumulatedReasoning = accumulatedReasoning;
+    events.push({
+      type: "response.reasoning_summary_text.delta",
+      item_id: reasoningItemId,
+      output_index: outputIndex,
+      summary_index: 0,
+      delta: reasoningText,
     });
   }
 
@@ -346,18 +434,21 @@ export function translateChatStreamChunkToResponses(
   if (text) {
     if (!ctx.state.textOutputItemAdded) {
       ctx.state.textOutputItemAdded = true;
+      const outputIndex = allocateOutputIndex(ctx);
+      ctx.state.textOutputIndex = outputIndex;
       events.push({
         type: "response.output_item.added",
-        output_index: 0,
-        item: createAssistantItem(itemId, "in_progress", ""),
+        output_index: outputIndex,
+        item: createAssistantItem(textItemId, "in_progress", ""),
       });
     }
+    const outputIndex = ctx.state.textOutputIndex as number;
     accumulatedText += text;
     ctx.state.accumulatedText = accumulatedText;
     events.push({
       type: "response.output_text.delta",
-      item_id: itemId,
-      output_index: 0,
+      item_id: textItemId,
+      output_index: outputIndex,
       content_index: 0,
       delta: text,
     });
@@ -368,31 +459,39 @@ export function translateChatStreamChunkToResponses(
   const toolCallsDelta = delta?.tool_calls as Array<Record<string, unknown>> | undefined;
   if (toolCallsDelta && toolCallsDelta.length > 0) {
     for (const toolCall of toolCallsDelta) {
-      const index = (toolCall.index as number) ?? 0;
-      const existing = accumulatedToolCalls[index] ?? {};
-      const toolCallId = (toolCall.id as string) ?? (existing.id as string) ?? `${responseId}_tool_${index}`;
+      const chatIndex = (toolCall.index as number) ?? 0;
+      const existing = accumulatedToolCalls[chatIndex] ?? {};
+      const toolCallId = (toolCall.id as string) ?? (existing.id as string) ?? `${responseId}_tool_${chatIndex}`;
       const fn = toolCall.function as Record<string, unknown> | undefined;
       const name = (fn?.name as string) ?? (existing.name as string);
       const argsDelta = fn?.arguments as string | undefined;
 
-      accumulatedToolCalls[index] = {
+      let outputIndex: number;
+      if (typeof existing.outputIndex === "number") {
+        outputIndex = existing.outputIndex;
+      } else {
+        outputIndex = allocateOutputIndex(ctx);
+      }
+
+      accumulatedToolCalls[chatIndex] = {
         id: toolCallId,
         name,
         arguments: (existing.arguments as string | undefined ?? "") + (argsDelta ?? ""),
+        outputIndex,
       };
 
-      const addedKey = `toolCallAddedEmitted_${index}`;
+      const addedKey = `toolCallAddedEmitted_${chatIndex}`;
       if (!ctx.state[addedKey]) {
         ctx.state[addedKey] = true;
         events.push({
           type: "response.output_item.added",
-          output_index: index,
+          output_index: outputIndex,
           item: {
             type: "function_call",
             id: toolCallId,
             call_id: toolCallId,
             name,
-            arguments: accumulatedToolCalls[index].arguments,
+            arguments: accumulatedToolCalls[chatIndex].arguments,
             status: "in_progress",
           },
         });
@@ -402,7 +501,7 @@ export function translateChatStreamChunkToResponses(
         events.push({
           type: "response.function_call_arguments.delta",
           item_id: toolCallId,
-          output_index: index,
+          output_index: outputIndex,
           call_id: toolCallId,
           delta: argsDelta,
         });
@@ -413,20 +512,24 @@ export function translateChatStreamChunkToResponses(
 
   // Finish reason means the output item(s) and response are complete.
   if (finishReason) {
-    if (finishReason === "tool_calls" || Object.keys(accumulatedToolCalls).length > 0) {
-      for (const [indexStr, toolCall] of Object.entries(accumulatedToolCalls)) {
-        const index = Number(indexStr);
-        const toolCallId = (toolCall.id as string) ?? `${responseId}_tool_${index}`;
+    // Tool calls: emit done events sorted by the output_index they were assigned.
+    if (Object.keys(accumulatedToolCalls).length > 0) {
+      const sortedToolCalls = Object.values(accumulatedToolCalls).sort(
+        (a, b) => (a.outputIndex as number) - (b.outputIndex as number),
+      );
+      for (const toolCall of sortedToolCalls) {
+        const outputIndex = toolCall.outputIndex as number;
+        const toolCallId = (toolCall.id as string) ?? `${responseId}_tool_${outputIndex}`;
         events.push({
           type: "response.function_call_arguments.done",
           item_id: toolCallId,
-          output_index: index,
+          output_index: outputIndex,
           call_id: toolCallId,
           arguments: toolCall.arguments,
         });
         events.push({
           type: "response.output_item.done",
-          output_index: index,
+          output_index: outputIndex,
           item: {
             type: "function_call",
             id: toolCallId,
@@ -437,25 +540,51 @@ export function translateChatStreamChunkToResponses(
           },
         });
       }
-    } else if (ctx.state.textOutputItemAdded) {
+    }
+
+    if (ctx.state.reasoningOutputItemAdded) {
+      const outputIndex = ctx.state.reasoningOutputIndex as number;
+      events.push({
+        type: "response.reasoning_summary_text.done",
+        item_id: reasoningItemId,
+        output_index: outputIndex,
+        summary_index: 0,
+        text: accumulatedReasoning,
+      });
+      events.push({
+        type: "response.reasoning_summary_part.done",
+        item_id: reasoningItemId,
+        output_index: outputIndex,
+        summary_index: 0,
+        part: createSummaryTextPart(accumulatedReasoning),
+      });
+      events.push({
+        type: "response.output_item.done",
+        output_index: outputIndex,
+        item: createReasoningItem(reasoningItemId, "completed"),
+      });
+    }
+
+    if (ctx.state.textOutputItemAdded) {
+      const outputIndex = ctx.state.textOutputIndex as number;
       events.push({
         type: "response.output_text.done",
-        item_id: itemId,
-        output_index: 0,
+        item_id: textItemId,
+        output_index: outputIndex,
         content_index: 0,
         text: accumulatedText,
       });
       events.push({
         type: "response.content_part.done",
-        item_id: itemId,
-        output_index: 0,
+        item_id: textItemId,
+        output_index: outputIndex,
         content_index: 0,
         part: createOutputTextPart(accumulatedText),
       });
       events.push({
         type: "response.output_item.done",
-        output_index: 0,
-        item: createAssistantItem(itemId, "completed", accumulatedText),
+        output_index: outputIndex,
+        item: createAssistantItem(textItemId, "completed", accumulatedText),
       });
     }
 
