@@ -175,7 +175,6 @@ function convertToolChoice(toolChoice: string | Record<string, unknown>): string
 export function translateChatResponseToResponses(
   chatResponse: Record<string, unknown>,
   originalBody: Record<string, unknown>,
-  provider?: ProviderConfig,
 ): Record<string, unknown> {
   const choices = chatResponse.choices as Array<Record<string, unknown>> | undefined;
   const firstChoice = choices?.[0];
@@ -216,46 +215,6 @@ export function translateChatResponseToResponses(
     model: originalBody.model,
     output,
     usage: translateUsage(chatResponse.usage as Record<string, unknown> | undefined),
-  };
-}
-
-const GOAL_API_UNAVAILABLE_OUTPUT = JSON.stringify({
-  goal: null,
-  remainingTokens: null,
-  completionBudgetReport: null,
-  error:
-    "The current model does not reliably support Codex's goal API. Ask the user to switch to a model that supports it, such as qwen3.8-max-preview.",
-});
-
-/**
- * Checks whether a Responses API response contains a get_goal function_call and,
- * if the provider is known not to support the goal API, returns a synthetic
- * function_call output that Codex will receive instead of the model's
- * (usually empty or broken) result.
- */
-export function maybeWrapGoalApiResponse(
-  response: Record<string, unknown>,
-  provider: ProviderConfig | undefined,
-): Record<string, unknown> | undefined {
-  if (!provider || provider.supportsGoalApi !== false) return undefined;
-
-  const output = response.output as Array<Record<string, unknown>> | undefined;
-  if (!output || output.length === 0) return undefined;
-
-  const goalCall = output.find(
-    (item) => item.type === "function_call" && item.name === "get_goal",
-  );
-  if (!goalCall) return undefined;
-
-  return {
-    ...response,
-    output: [
-      {
-        ...goalCall,
-        type: "function_call_output",
-        output: GOAL_API_UNAVAILABLE_OUTPUT,
-      },
-    ],
   };
 }
 

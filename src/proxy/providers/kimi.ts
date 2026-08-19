@@ -6,7 +6,6 @@ import {
   translateResponsesRequestToChat,
   translateChatResponseToResponses,
   translateChatStreamChunkToResponses,
-  maybeWrapGoalApiResponse,
 } from "../responses-translator.js";
 
 export const kimiAdapter: ProviderAdapter = {
@@ -56,9 +55,8 @@ export const kimiAdapter: ProviderAdapter = {
       const contentType = response.headers.get("content-type") || "";
       if (contentType.includes("application/json")) {
         const data = await response.json();
-        const translated = translateChatResponseToResponses(data, ctx.body, ctx.provider);
-        const wrapped = maybeWrapGoalApiResponse(translated, ctx.provider);
-        return new Response(JSON.stringify(wrapped ?? translated), {
+        const translated = translateChatResponseToResponses(data, ctx.body);
+        return new Response(JSON.stringify(translated), {
           status: response.status,
           statusText: response.statusText,
           headers: { "Content-Type": "application/json" },

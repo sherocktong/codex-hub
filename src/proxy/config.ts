@@ -87,7 +87,6 @@ export function getDefaultProviderPresets(): Record<string, ProviderConfig> {
       models: ["kimi-k2-6", "kimi-k2-7", "kimi-k3", "kimi-k2-5-coding"],
       promptCacheRouting: "enabled",
       responsesToChatCompletions: true,
-      supportsGoalApi: false,
     },
     qianwen: {
       id: "qianwen",
@@ -100,7 +99,6 @@ export function getDefaultProviderPresets(): Record<string, ProviderConfig> {
       // cache_control markers for explicit context caching on supported models.
       promptCacheRouting: "enabled",
       responsesToChatCompletions: true,
-      supportsGoalApi: true,
     },
   };
 }
