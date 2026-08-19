@@ -92,6 +92,14 @@ export function createRequestHandler(config: ProxyInstanceConfig): RequestHandle
         const isStream = !!body.stream;
         const adapter = getAdapter(provider);
 
+        if (!response.ok) {
+          await logRequest(ctx, response);
+          res.writeHead(response.status, Object.fromEntries(response.headers.entries()));
+          const errorBody = await response.arrayBuffer();
+          res.end(Buffer.from(errorBody));
+          return;
+        }
+
         res.writeHead(response.status, Object.fromEntries(response.headers.entries()));
 
         if (isStream && response.body) {
@@ -335,6 +343,22 @@ function handleWebSocketConnection(
         headers,
         sessionId,
       );
+
+      if (!response.ok) {
+        await logRequest(ctx, response);
+        const errorBody = await response.text();
+        let message = errorBody;
+        try {
+          const parsed = JSON.parse(errorBody) as Record<string, unknown>;
+          const error = (parsed.error as Record<string, unknown>) ?? parsed;
+          message = typeof error.message === "string" ? error.message : errorBody;
+        } catch {
+          // keep raw body as message
+        }
+        await sendWsError(ws, response.status, message, "upstream_error");
+        ws.close();
+        return;
+      }
 
       const adapter = getAdapter(provider);
 

@@ -68,9 +68,17 @@ export function createForwarder(
             const errText = await upstreamRes.clone().text();
             const translated = await adapter.translateError(upstreamRes.clone(), errText);
             if (translated) {
-              router.recordResult(provider.id, true);
+              router.recordResult(provider.id, false);
               return { response: translated, provider, ctx };
             }
+          }
+
+          // If no provider remains in the failover queue, surface the upstream
+          // error response directly instead of masking it as a generic 502.
+          if (ctx.failoverQueue.length === 0) {
+            router.recordResult(provider.id, false);
+            logger.warn(`forward: upstream error from ${provider.name}: ${upstreamRes.status}`);
+            return { response: upstreamRes, provider, ctx };
           }
 
           const errText = await upstreamRes.text();

@@ -241,7 +241,7 @@ describe("websocket proxy", () => {
     expect(messages.length).toBeGreaterThan(0);
     const lastMessage = JSON.parse(messages[messages.length - 1].toString("utf-8"));
     expect(lastMessage.type).toBe("response.failed");
-    expect(lastMessage.response.error.type).toBe("proxy_error");
-    expect(lastMessage.response.error.message).toContain("All providers failed");
+    expect(lastMessage.response.error.type).toBe("upstream_error");
+    expect(lastMessage.response.error.message).toContain("bad request");
   });
 });

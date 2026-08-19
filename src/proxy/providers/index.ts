@@ -85,3 +85,14 @@ export function shouldEnablePromptCacheRouting(provider: ProviderConfig): boolea
   // "enabled", "auto", and undefined all default to on for backward compatibility.
   return true;
 }
+
+export function mergeProviderHeaders(
+  headers: Headers,
+  provider: ProviderConfig,
+): Headers {
+  if (!provider.headers) return headers;
+  for (const [key, value] of Object.entries(provider.headers)) {
+    headers.set(key, value);
+  }
+  return headers;
+}

@@ -4,7 +4,9 @@ import {
   buildUpstreamUrl,
   shouldEnablePromptCacheRouting,
   parseOpenAIUsage,
+  mergeProviderHeaders,
 } from "../src/proxy/providers/index.js";
+import { kimiAdapter } from "../src/proxy/providers/kimi.js";
 import type { ProviderConfig } from "../src/types.js";
 
 describe("provider utilities", () => {
@@ -65,5 +67,42 @@ describe("provider utilities", () => {
 
   it("returns undefined when usage is missing", () => {
     expect(parseOpenAIUsage({})).toBeUndefined();
+  });
+
+  it("merges provider headers into request headers", () => {
+    const headers = new Headers();
+    headers.set("Authorization", "Bearer old");
+    mergeProviderHeaders(headers, { ...provider, headers: { "X-Custom": "value", Authorization: "Bearer overridden" } });
+    expect(headers.get("X-Custom")).toBe("value");
+    expect(headers.get("Authorization")).toBe("Bearer overridden");
+  });
+
+  it("leaves headers unchanged when provider has no custom headers", () => {
+    const headers = new Headers();
+    headers.set("Authorization", "Bearer token");
+    mergeProviderHeaders(headers, provider);
+    expect(headers.get("Authorization")).toBe("Bearer token");
+  });
+
+  it("translates Kimi context-length errors to OpenAI shape", async () => {
+    const response = new Response(
+      JSON.stringify({ error: { message: "maximum context length 65536 tokens exceeded", type: "invalid_request_error" } }),
+      { status: 400, headers: { "Content-Type": "application/json" } },
+    );
+    const translated = await kimiAdapter.translateError?.(response, await response.clone().text());
+    expect(translated).toBeDefined();
+    const body = await translated!.json();
+    expect(body.error.type).toBe("context_length_exceeded");
+    expect(body.error.code).toBe("context_length_exceeded");
+    expect(body.error.message).toContain("65536");
+  });
+
+  it("returns undefined for Kimi errors that do not match a known pattern", async () => {
+    const response = new Response(
+      JSON.stringify({ error: { message: "unknown parameter", type: "invalid_request_error" } }),
+      { status: 400, headers: { "Content-Type": "application/json" } },
+    );
+    const translated = await kimiAdapter.translateError?.(response, await response.clone().text());
+    expect(translated).toBeUndefined();
   });
 });

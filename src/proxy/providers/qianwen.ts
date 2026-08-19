@@ -1,5 +1,5 @@
 import type { ProviderAdapter, RequestContext } from "../types.js";
-import { buildUpstreamUrl, normalizeModel, shouldEnablePromptCacheRouting } from "./index.js";
+import { buildUpstreamUrl, mergeProviderHeaders, normalizeModel, shouldEnablePromptCacheRouting } from "./index.js";
 import { injectCacheRouting } from "../cache-injector.js";
 import * as logger from "../../logger.js";
 import {
@@ -35,6 +35,7 @@ export const qianwenAdapter: ProviderAdapter = {
     headers.set("User-Agent", "codx/0.1.0");
     headers.delete("host");
     headers.delete("content-length");
+    mergeProviderHeaders(headers, ctx.provider);
 
     if (shouldEnablePromptCacheRouting(ctx.provider)) {
       injectCacheRouting(upstreamBody, ctx);
