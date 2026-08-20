@@ -1,6 +1,7 @@
 import type { ProviderConfig, RequestContext, ForwardResult } from "./types.js";
 import { getAdapter } from "./providers/index.js";
 import { createProviderRouter } from "./router.js";
+import { logProxyRequest } from "./logging.js";
 import * as logger from "../logger.js";
 
 export interface Forwarder {
@@ -49,15 +50,47 @@ export function createForwarder(
         try {
           const adapter = getAdapter(provider);
           const upstreamReq = await adapter.transformRequest(ctx);
+
+          let upstreamBody: string | undefined;
+          try {
+            upstreamBody = await upstreamReq.clone().text();
+          } catch {
+            // ignore body-read failures for logging
+          }
+
           logger.debug(`forward: ${method} ${path} -> ${provider.name} (${provider.baseUrl})`);
+
+          // Log the original Responses API body for diagnostics before the adapter
+          // strips or rewrites fields.
+          logProxyRequest(profileName, {
+            timestamp: new Date().toISOString(),
+            session_id: sessionId,
+            method,
+            path,
+            upstream_url: upstreamReq.url,
+            original_body: body,
+          });
 
           const upstreamRes = await fetch(upstreamReq, {
             redirect: "follow",
           });
 
+          const isStream =
+            upstreamRes.headers.get("content-type")?.includes("text/event-stream") ?? false;
+
           if (upstreamRes.ok) {
             router.recordResult(provider.id, true);
             const response = await adapter.transformResponse(ctx, upstreamRes);
+            logProxyRequest(profileName, {
+              timestamp: new Date().toISOString(),
+              session_id: sessionId,
+              method,
+              path,
+              upstream_url: upstreamReq.url,
+              request_body: upstreamBody ? tryParseJson(upstreamBody) : undefined,
+              response_status: response.status,
+              streaming: isStream,
+            });
             return { response, provider, ctx };
           }
 
@@ -95,4 +128,12 @@ export function createForwarder(
       throw new Error(`All providers failed for profile '${profileName}'. ${lastErrorMessages.join("; ")}`);
     },
   };
+}
+
+function tryParseJson(text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
+  }
 }

@@ -7,6 +7,11 @@
  */
 
 import type { ProviderConfig } from "../types.js";
+import {
+  getConversationMessages,
+  mergeConversationHistory,
+  setConversationMessages,
+} from "./conversation-state.js";
 
 // Additional OpenAI Chat Completions parameters that should be passed through
 // from a Responses API request when present. Mirrors cc-switch's
@@ -39,36 +44,63 @@ export function shouldTranslateResponsesToChat(provider: ProviderConfig): boolea
 export function translateResponsesRequestToChat(
   body: Record<string, unknown>,
   provider: ProviderConfig,
+  ctx?: { state: Record<string, unknown> },
 ): TranslatedBodies {
   const upstreamBody: Record<string, unknown> = { ...body };
   delete upstreamBody.input;
-
-  const messages: Array<Record<string, unknown>> = [];
+  delete upstreamBody.previous_response_id;
 
   // OpenAI's Responses API uses `instructions` for system-level developer text.
   // Chat Completions providers expect a leading system message.
   const instructionsText = typeof body.instructions === "string"
     ? body.instructions
     : extractInstructionsText(body.instructions);
+
+  const newMessages: Array<Record<string, unknown>> = [];
   if (instructionsText) {
-    messages.push({ role: "system", content: instructionsText });
+    newMessages.push({ role: "system", content: instructionsText });
   }
 
   const input = body.input as Array<Record<string, unknown>> | undefined;
+
+  // The Responses API is stateful: clients may send `previous_response_id`
+  // instead of replaying the whole conversation. Chat Completions providers are
+  // stateless, so prepend the stored history for that response id. We also seed
+  // the message builder with any unresolved tool calls from prior turns so that
+  // a follow-up `function_call_output` can be matched without synthesizing a
+  // duplicate assistant placeholder.
+  const previousResponseId = body.previous_response_id as string | undefined;
+  const priorMessages = previousResponseId
+    ? getConversationMessages(previousResponseId)
+    : undefined;
+  const initialPendingToolCallIds = priorMessages
+    ? extractPendingToolCallIds(priorMessages)
+    : undefined;
+
   if (Array.isArray(input)) {
-    messages.push(...buildMessages(input));
+    newMessages.push(...buildMessages(input, { initialPendingToolCallIds }));
   }
+
+  let messages = mergeConversationHistory(previousResponseId, instructionsText, newMessages);
 
   // MiniMax and some other strict gateways reject intermediate system messages,
   // so collapse all system/developer messages into a single head message.
-  upstreamBody.messages = collapseSystemMessagesToHead(messages);
+  messages = collapseSystemMessagesToHead(messages);
 
   // Providers such as Kimi reject chat-completion requests whose messages array
   // is empty ("messages must not be empty"). Codex occasionally sends an empty
   // input array (e.g. during startup probes), so pad with a harmless placeholder
   // message to keep the connection healthy instead of aborting the WebSocket.
-  if ((upstreamBody.messages as Array<Record<string, unknown>>).length === 0) {
-    upstreamBody.messages = [{ role: "user", content: "​" }];
+  if (messages.length === 0) {
+    messages = [{ role: "user", content: "​" }];
+  }
+
+  upstreamBody.messages = messages;
+
+  // Stash the final messages on the request context so the response translator
+  // can persist them under the new response id for the next turn.
+  if (ctx) {
+    ctx.state.conversationMessages = messages;
   }
 
   // Copy common params that are shared between the two APIs.
@@ -144,9 +176,12 @@ export function translateResponsesRequestToChat(
   };
 }
 
-function buildMessages(input: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
+function buildMessages(
+  input: Array<Record<string, unknown>>,
+  options?: { initialPendingToolCallIds?: Set<string> },
+): Array<Record<string, unknown>> {
   const messages: Array<Record<string, unknown>> = [];
-  const pendingToolCallIds = new Set<string>();
+  const pendingToolCallIds = new Set<string>(options?.initialPendingToolCallIds ?? []);
   const pendingReasoning: string[] = [];
   let lastAssistantIndex = -1;
 
@@ -191,6 +226,18 @@ function buildMessages(input: Array<Record<string, unknown>>): Array<Record<stri
   for (const item of input) {
     if (item.type === "function_call") {
       const toolCall = translateFunctionCall(item);
+
+      // Malformed function_call items (empty or placeholder "unknown" names) do
+      // not correspond to real tools. Dropping them avoids Kimi's requirement
+      // that every assistant tool_call be followed by a matching tool message.
+      // Any trailing reasoning is still preserved for the next assistant turn.
+      if (!toolCall) {
+        if (typeof item.reasoning_content === "string") {
+          appendPendingReasoning(item.reasoning_content);
+        }
+        continue;
+      }
+
       const toolCallId = (toolCall.id as string) ?? "";
 
       // Some function_call items carry embedded reasoning that belongs to this
@@ -317,6 +364,32 @@ function buildMessages(input: Array<Record<string, unknown>>): Array<Record<stri
       continue;
     }
 
+    // Bare input_* items (input_text, input_image, input_file, input_audio) can
+    // appear directly in the input array without a wrapping message object. Treat
+    // them as their own chat message, mirroring cc-switch behavior, so the model
+    // sees readable content instead of a JSON-stringified item blob.
+    if (
+      item.type === "input_text" ||
+      item.type === "input_image" ||
+      item.type === "input_file" ||
+      item.type === "input_audio"
+    ) {
+      // Non-assistant turn boundaries: do not let reasoning leak across user/system
+      // turns; attach it to the previous assistant if one exists.
+      appendReasoningToAssistant();
+
+      const role = typeof item.role === "string" ? item.role : "user";
+      const chatRole = role === "developer" || role === "system" ? "system" : role;
+      const chatContent = translateContent([item]);
+      messages.push({
+        role: chatRole,
+        content: chatContent,
+      });
+      lastAssistantIndex = -1;
+      pendingToolCallIds.clear();
+      continue;
+    }
+
     // Non-assistant turn boundaries: do not let reasoning leak across user/system
     // turns; attach it to the previous assistant if one exists.
     appendReasoningToAssistant();
@@ -392,13 +465,21 @@ function collapseSystemMessagesToHead(messages: Array<Record<string, unknown>>):
   return [{ role: "system", content: systemContent }, ...collapsed];
 }
 
-function translateFunctionCall(item: Record<string, unknown>): Record<string, unknown> {
+function isValidToolName(name: unknown): boolean {
+  return typeof name === "string" && name.trim().length > 0 && name.trim().toLowerCase() !== "unknown";
+}
+
+function translateFunctionCall(item: Record<string, unknown>): Record<string, unknown> | undefined {
   const toolCallId = ((item.call_id as string) ?? (item.id as string)) || "";
+  const name = (item.name as string) ?? "";
+  if (!isValidToolName(name)) {
+    return undefined;
+  }
   return {
     id: toolCallId,
     type: "function",
     function: {
-      name: (item.name as string) ?? "",
+      name,
       arguments: canonicalizeToolArguments(item.arguments),
     },
   };
@@ -435,6 +516,20 @@ function extractToolCallIds(msg: Record<string, unknown>): string[] {
   return toolCalls
     .map((toolCall) => ((toolCall.id ?? toolCall.call_id) as string | undefined) ?? "")
     .filter(Boolean);
+}
+
+function extractPendingToolCallIds(messages: Array<Record<string, unknown>>): Set<string> {
+  const pending = new Set<string>();
+  for (const msg of messages) {
+    if (msg.role === "assistant") {
+      const ids = extractToolCallIds(msg);
+      for (const id of ids) pending.add(id);
+    } else if (msg.role === "tool") {
+      const toolCallId = msg.tool_call_id as string;
+      if (toolCallId) pending.delete(toolCallId);
+    }
+  }
+  return pending;
 }
 
 function translateAssistantMessage(item: Record<string, unknown>): Record<string, unknown> {
@@ -619,6 +714,7 @@ function convertResponseFormat(responseFormat: Record<string, unknown>): Record<
 export function translateChatResponseToResponses(
   chatResponse: Record<string, unknown>,
   originalBody: Record<string, unknown>,
+  ctx?: { state: Record<string, unknown> },
 ): Record<string, unknown> {
   const choices = chatResponse.choices as Array<Record<string, unknown>> | undefined;
   const firstChoice = choices?.[0];
@@ -662,9 +758,10 @@ export function translateChatResponseToResponses(
     for (const toolCall of toolCalls) {
       const fn = toolCall.function as Record<string, unknown> | undefined;
       const name = (fn?.name as string | undefined) ?? "";
-      // Defensive: skip tool calls with missing/empty names (some models generate
-      // malformed tool calls). Mirrors cc-switch behavior.
-      if (name.trim().length === 0) {
+      // Defensive: skip tool calls with missing/empty/placeholder names (some
+      // models generate malformed tool calls or emit a literal "unknown"
+      // placeholder). Mirrors cc-switch behavior.
+      if (!isValidToolName(name)) {
         droppedToolCallCount++;
         continue;
       }
@@ -714,7 +811,37 @@ export function translateChatResponseToResponses(
     response.incomplete_details = { reason: "max_output_tokens" };
   }
 
+  // Persist the full conversation under this response id so a future
+  // `previous_response_id` request can be reconstructed for stateless Chat
+  // Completions providers. Include the assistant response we just received.
+  if (ctx) {
+    const conversationMessages = ctx.state.conversationMessages as Array<Record<string, unknown>> | undefined;
+    if (conversationMessages) {
+      const assistantMessage = buildAssistantChatMessage(message, toolCalls);
+      setConversationMessages(responseId, [...conversationMessages, assistantMessage]);
+    }
+  }
+
   return response;
+}
+
+function buildAssistantChatMessage(
+  message: Record<string, unknown> | undefined,
+  toolCalls: Array<Record<string, unknown>> | undefined,
+): Record<string, unknown> {
+  const assistantMessage: Record<string, unknown> = { role: "assistant" };
+  if (message) {
+    if (message.content !== undefined) {
+      assistantMessage.content = message.content;
+    }
+    if (typeof message.reasoning_content === "string" && message.reasoning_content.trim()) {
+      assistantMessage.reasoning_content = message.reasoning_content;
+    }
+  }
+  if (toolCalls && toolCalls.length > 0) {
+    assistantMessage.tool_calls = toolCalls;
+  }
+  return assistantMessage;
 }
 
 function responseStatusFromFinishReason(finishReason: string | undefined): string {
@@ -1071,6 +1198,13 @@ export function translateChatStreamChunkToResponses(
   let accumulatedReasoning = (ctx.state.accumulatedReasoning as string) ?? "";
   const accumulatedToolCalls = (ctx.state.accumulatedToolCalls as Record<number, Record<string, unknown>>) ?? {};
 
+  // Capture the response id from the first chunk that carries one. Streaming
+  // responses return the upstream id directly, and Codex CLI uses that id as
+  // `previous_response_id` for the next turn.
+  if (chunk.id && !ctx.state.responseId) {
+    ctx.state.responseId = chunk.id;
+  }
+
   // Usage-only chunk at the end of the stream: emit completion if we have not already done so.
   if (chunk.error) {
     const error = chunk.error as Record<string, unknown>;
@@ -1092,6 +1226,7 @@ export function translateChatStreamChunkToResponses(
   if (!firstChoice && chunk.usage !== undefined) {
     if (ctx.state.completedEmitted) return [];
     ctx.state.completedEmitted = true;
+    persistStreamingConversation(ctx, responseId);
     return [
       {
         type: "response.completed",
@@ -1172,7 +1307,7 @@ export function translateChatStreamChunkToResponses(
 
       // Only announce the tool call once we have a usable name.
       const addedKey = `toolCallAddedEmitted_${chatIndex}`;
-      if (!ctx.state[addedKey] && name.trim().length > 0) {
+      if (!ctx.state[addedKey] && isValidToolName(name)) {
         ctx.state[addedKey] = true;
         accumulatedToolCalls[chatIndex].added = true;
         events.push({
@@ -1189,7 +1324,7 @@ export function translateChatStreamChunkToResponses(
         });
       }
 
-      if (argsDelta && name.trim().length > 0) {
+      if (argsDelta && isValidToolName(name)) {
         events.push({
           type: "response.function_call_arguments.delta",
           item_id: toolCallId,
@@ -1210,7 +1345,7 @@ export function translateChatStreamChunkToResponses(
       (a, b) => (a.outputIndex as number) - (b.outputIndex as number),
     );
     const usableToolCalls = sortedToolCalls.filter(
-      (tc) => typeof tc.name === "string" && tc.name.trim().length > 0 && tc.added,
+      (tc) => isValidToolName(tc.name) && tc.added,
     );
     const droppedToolCalls = sortedToolCalls.length - usableToolCalls.length;
 
@@ -1313,6 +1448,7 @@ export function translateChatStreamChunkToResponses(
     const completionStatus = responseStatusFromFinishReason(finishReason);
     if (!ctx.state.completedEmitted) {
       ctx.state.completedEmitted = true;
+      persistStreamingConversation(ctx, responseId);
       const response = createResponseObject(
         responseId,
         model,
@@ -1331,6 +1467,53 @@ export function translateChatStreamChunkToResponses(
   }
 
   return events;
+}
+
+function persistStreamingConversation(
+  ctx: { state: Record<string, unknown> },
+  responseId: string,
+): void {
+  if (responseId === "resp_0") return;
+  const conversationMessages = ctx.state.conversationMessages as Array<Record<string, unknown>> | undefined;
+  if (!conversationMessages) return;
+  const assistantMessage = buildStreamingAssistantChatMessage(ctx, responseId);
+  setConversationMessages(responseId, [...conversationMessages, assistantMessage]);
+}
+
+function buildStreamingAssistantChatMessage(
+  ctx: { state: Record<string, unknown> },
+  responseId: string,
+): Record<string, unknown> {
+  const assistantMessage: Record<string, unknown> = { role: "assistant" };
+  const accumulatedText = (ctx.state.accumulatedText as string) ?? "";
+  const accumulatedReasoning = (ctx.state.accumulatedReasoning as string) ?? "";
+  const accumulatedToolCalls = (ctx.state.accumulatedToolCalls as Record<number, Record<string, unknown>>) ?? {};
+
+  const toolCalls = Object.values(accumulatedToolCalls)
+    .filter((tc) => isValidToolName(tc.name) && tc.added)
+    .sort((a, b) => (a.outputIndex as number) - (b.outputIndex as number))
+    .map((tc) => ({
+      id: (tc.id as string) ?? `${responseId}_tool_${tc.outputIndex as number}`,
+      type: "function",
+      function: {
+        name: tc.name,
+        arguments: canonicalizeToolArguments(tc.arguments),
+      },
+    }));
+
+  if (accumulatedReasoning.trim()) {
+    assistantMessage.reasoning_content = accumulatedReasoning;
+  }
+  if (toolCalls.length > 0) {
+    assistantMessage.content = null;
+    assistantMessage.tool_calls = toolCalls;
+  } else if (accumulatedText) {
+    assistantMessage.content = accumulatedText;
+  } else {
+    assistantMessage.content = null;
+  }
+
+  return assistantMessage;
 }
 
 export function createResponsesDoneChunk(usage?: Record<string, unknown>): Record<string, unknown> {

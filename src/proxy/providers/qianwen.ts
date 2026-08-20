@@ -24,7 +24,7 @@ export const qianwenAdapter: ProviderAdapter = {
       shouldTranslateResponsesToChat(ctx.provider) &&
       (ctx.path === "/v1/responses" || ctx.path === "/v1/responses/compact");
     if (translateResponses) {
-      const translated = translateResponsesRequestToChat(body, ctx.provider);
+      const translated = translateResponsesRequestToChat(body, ctx.provider, ctx);
       upstreamPath = translated.upstreamPath;
       upstreamBody = translated.upstreamBody;
     }
@@ -58,7 +58,7 @@ export const qianwenAdapter: ProviderAdapter = {
       const contentType = response.headers.get("content-type") || "";
       if (contentType.includes("application/json")) {
         const data = await response.json();
-        const translated = translateChatResponseToResponses(data, ctx.body);
+        const translated = translateChatResponseToResponses(data, ctx.body, ctx);
         return new Response(JSON.stringify(translated), {
           status: response.status,
           statusText: response.statusText,

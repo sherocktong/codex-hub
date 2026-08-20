@@ -5,6 +5,11 @@ import {
   translateChatStreamChunkToResponses,
   createResponsesDoneChunk,
 } from "../src/proxy/responses-translator.js";
+import {
+  getConversationMessages,
+  setConversationMessages,
+  mergeConversationHistory,
+} from "../src/proxy/conversation-state.js";
 import type { ProviderConfig } from "../src/types.js";
 
 const provider: ProviderConfig = {
@@ -1171,20 +1176,353 @@ describe("responses-to-chat-completions translator", () => {
     ]);
   });
 
-  it("synthesizes a placeholder tool_call_id for function_call_output missing call_id", () => {
+  it("drops function_call items with placeholder 'unknown' names from request history", () => {
     const result = translateResponsesRequestToChat(
       {
         model: "kimi-k2.7",
-        input: [{ type: "function_call_output", id: "fc_out_1", output: "result" }],
+        input: [
+          { type: "function_call", id: "call_1", name: "unknown", arguments: "{}" },
+          { type: "function_call_output", call_id: "call_1", output: "error" },
+        ],
       },
       provider,
     );
-    expect(result.upstreamBody.messages).toHaveLength(2);
-    const assistantMsg = result.upstreamBody.messages[0] as Record<string, unknown>;
-    const toolMsg = result.upstreamBody.messages[1] as Record<string, unknown>;
-    expect(assistantMsg.role).toBe("assistant");
-    expect(toolMsg.role).toBe("tool");
-    expect(toolMsg.tool_call_id).toBe("fc_out_1");
-    expect((assistantMsg.tool_calls as Array<Record<string, unknown>>)[0].id).toBe("fc_out_1");
+    const messages = result.upstreamBody.messages as Array<Record<string, unknown>>;
+    expect(messages).toHaveLength(2);
+    expect(messages[0].role).toBe("assistant");
+    // The original malformed function_call is dropped; the matching output is
+    // kept as an orphan with a synthetic placeholder tool_call entry.
+    expect(messages[0].tool_calls).toEqual([
+      {
+        id: "call_1",
+        type: "function",
+        function: { name: "unknown", arguments: "{}" },
+      },
+    ]);
+    expect(messages[1]).toEqual({ role: "tool", tool_call_id: "call_1", content: "error" });
+  });
+
+  it("drops function_call items with empty names from request history", () => {
+    const result = translateResponsesRequestToChat(
+      {
+        model: "kimi-k2.7",
+        input: [
+          { type: "function_call", id: "call_1", name: "", arguments: "{}" },
+          { type: "function_call", id: "call_2", name: "exec_command", arguments: '{"cmd":"ls"}' },
+          { type: "function_call_output", call_id: "call_1", output: "orphan" },
+          { type: "function_call_output", call_id: "call_2", output: "file.txt" },
+        ],
+      },
+      provider,
+    );
+    const messages = result.upstreamBody.messages as Array<Record<string, unknown>>;
+    expect(messages).toHaveLength(4);
+    expect(messages[0].role).toBe("assistant");
+    expect((messages[0].tool_calls as Array<Record<string, unknown>>).map((tc) => (tc.function as Record<string, unknown>).name)).toEqual([
+      "exec_command",
+    ]);
+    expect(messages[1].role).toBe("assistant");
+    expect((messages[1].tool_calls as Array<Record<string, unknown>>).map((tc) => (tc.function as Record<string, unknown>).name)).toEqual([
+      "unknown",
+    ]);
+    expect(messages[2]).toEqual({ role: "tool", tool_call_id: "call_1", content: "orphan" });
+    expect(messages[3]).toEqual({ role: "tool", tool_call_id: "call_2", content: "file.txt" });
+  });
+
+  it("preserves reasoning when dropping malformed function_call items", () => {
+    const result = translateResponsesRequestToChat(
+      {
+        model: "kimi-k2.7",
+        input: [
+          { type: "function_call", id: "call_1", name: "unknown", arguments: "{}", reasoning_content: "Need to think." },
+          { type: "message", role: "assistant", content: "I cannot do that." },
+        ],
+      },
+      provider,
+    );
+    const messages = result.upstreamBody.messages as Array<Record<string, unknown>>;
+    expect(messages).toHaveLength(1);
+    expect(messages[0].role).toBe("assistant");
+    expect(messages[0].reasoning_content).toBe("Need to think.");
+    expect(messages[0].content).toBe("I cannot do that.");
+    expect(messages[0].tool_calls).toBeUndefined();
+  });
+
+  it("drops 'unknown' tool_calls from non-streaming responses", () => {
+    const translated = translateChatResponseToResponses(
+      {
+        id: "chatcmpl-unknown",
+        object: "chat.completion",
+        model: "kimi-k2-5-coding",
+        choices: [
+          {
+            message: {
+              role: "assistant",
+              tool_calls: [
+                { id: "call_1", function: { name: "unknown", arguments: "{}" } },
+                { id: "call_2", function: { name: "exec_command", arguments: '{"cmd":"ls"}' } },
+              ],
+            },
+            finish_reason: "tool_calls",
+          },
+        ],
+      },
+      { model: "kimi-k2.7" },
+    );
+    const output = translated.output as Array<Record<string, unknown>>;
+    expect(output).toHaveLength(1);
+    expect(output[0]).toMatchObject({
+      type: "function_call",
+      id: "call_2",
+      name: "exec_command",
+      arguments: '{"cmd":"ls"}',
+    });
+  });
+
+  it("does not emit 'unknown' tool_calls from streaming responses", () => {
+    const ctx = { state: {} };
+    const originalBody = { model: "kimi-k2.7" };
+
+    const announceChunk = translateChatStreamChunkToResponses(
+      ctx,
+      {
+        id: "chatcmpl-stream-unknown",
+        created: 1234567890,
+        choices: [
+          {
+            delta: {
+              tool_calls: [
+                { index: 0, id: "call_1", type: "function", function: { name: "unknown" } },
+                { index: 1, id: "call_2", type: "function", function: { name: "exec_command" } },
+              ],
+            },
+          },
+        ],
+      },
+      originalBody,
+    );
+
+    const added = announceChunk?.filter(
+      (e) => e.type === "response.output_item.added" && (e.item as Record<string, unknown>)?.type === "function_call",
+    ) as Array<Record<string, unknown>> | undefined;
+    expect(added).toHaveLength(1);
+    expect((added?.[0].item as Record<string, unknown>)?.name).toBe("exec_command");
+  });
+
+  it("translates bare input_text items into a user message", () => {
+    const result = translateResponsesRequestToChat(
+      {
+        model: "kimi-k2.7",
+        input: [{ type: "input_text", text: "scan the code" }],
+      },
+      provider,
+    );
+    expect(result.upstreamBody.messages).toEqual([
+      { role: "user", content: [{ type: "text", text: "scan the code" }] },
+    ]);
+  });
+
+  it("translates bare input_image items into a user message", () => {
+    const result = translateResponsesRequestToChat(
+      {
+        model: "kimi-k2.7",
+        input: [{ type: "input_image", image_url: "https://example.com/img.png" }],
+      },
+      provider,
+    );
+    expect(result.upstreamBody.messages).toEqual([
+      { role: "user", content: [{ type: "image_url", image_url: "https://example.com/img.png" }] },
+    ]);
+  });
+
+  it("translates bare input_file items into a user message", () => {
+    const result = translateResponsesRequestToChat(
+      {
+        model: "kimi-k2.7",
+        input: [{ type: "input_file", file_id: "file_123" }],
+      },
+      provider,
+    );
+    expect(result.upstreamBody.messages).toEqual([
+      { role: "user", content: [{ type: "text", text: "[file: file_123]" }] },
+    ]);
+  });
+
+  it("flushes pending tool calls before emitting a bare input_text user message", () => {
+    const result = translateResponsesRequestToChat(
+      {
+        model: "kimi-k2.7",
+        input: [
+          { type: "function_call", id: "call_1", name: "exec_command", arguments: '{"cmd":"ls"}' },
+          { type: "input_text", text: "Now summarize the results." },
+        ],
+      },
+      provider,
+    );
+    const messages = result.upstreamBody.messages as Array<Record<string, unknown>>;
+    expect(messages).toHaveLength(2);
+    expect(messages[0].role).toBe("assistant");
+    expect(messages[0].tool_calls).toEqual([
+      {
+        id: "call_1",
+        type: "function",
+        function: { name: "exec_command", arguments: '{"cmd":"ls"}' },
+      },
+    ]);
+    expect(messages[1]).toEqual({
+      role: "user",
+      content: [{ type: "text", text: "Now summarize the results." }],
+    });
+  });
+
+  it("does not let pending reasoning leak across a bare input_text user turn", () => {
+    const result = translateResponsesRequestToChat(
+      {
+        model: "kimi-k2.7",
+        input: [
+          { type: "reasoning", content: "Need to think." },
+          { type: "input_text", text: "Continue." },
+        ],
+      },
+      provider,
+    );
+    const messages = result.upstreamBody.messages as Array<Record<string, unknown>>;
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toEqual({
+      role: "user",
+      content: [{ type: "text", text: "Continue." }],
+    });
+  });
+});
+
+describe("conversation state for previous_response_id", () => {
+  it("merges prior history with a new request", () => {
+    const prior = [
+      { role: "system", content: "sys" },
+      { role: "user", content: "hi" },
+      { role: "assistant", content: "hello" },
+    ];
+    setConversationMessages("resp_123", prior);
+    const merged = mergeConversationHistory("resp_123", "new sys", [
+      { role: "system", content: "ignored" },
+      { role: "user", content: "follow-up" },
+    ]);
+    expect(merged).toEqual([
+      { role: "system", content: "new sys" },
+      { role: "user", content: "hi" },
+      { role: "assistant", content: "hello" },
+      { role: "user", content: "follow-up" },
+    ]);
+  });
+
+  it("falls back to prior system message when new instructions are absent", () => {
+    setConversationMessages("resp_prior", [
+      { role: "system", content: "prior sys" },
+      { role: "user", content: "hi" },
+    ]);
+    const result = translateResponsesRequestToChat(
+      {
+        model: "kimi-k2.7",
+        previous_response_id: "resp_prior",
+        input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "again" }] }],
+      },
+      provider,
+    );
+    expect(result.upstreamBody.messages).toEqual([
+      { role: "system", content: "prior sys" },
+      { role: "user", content: "hi" },
+      { role: "user", content: [{ type: "text", text: "again" }] },
+    ]);
+  });
+
+  it("replays stored history when previous_response_id is supplied", () => {
+    setConversationMessages("resp_prev", [
+      { role: "system", content: "sys" },
+      { role: "user", content: "scan the code" },
+      { role: "assistant", content: null, tool_calls: [{ id: "call_1", type: "function", function: { name: "exec_command", arguments: "{}" } }] },
+    ]);
+    const ctx = { state: {} };
+    const result = translateResponsesRequestToChat(
+      {
+        model: "kimi-k2.7",
+        instructions: "sys",
+        previous_response_id: "resp_prev",
+        input: [{ type: "function_call_output", call_id: "call_1", output: "done" }],
+      },
+      provider,
+      ctx,
+    );
+    expect(result.upstreamBody.messages).toEqual([
+      { role: "system", content: "sys" },
+      { role: "user", content: "scan the code" },
+      { role: "assistant", content: null, tool_calls: [{ id: "call_1", type: "function", function: { name: "exec_command", arguments: "{}" } }] },
+      { role: "tool", tool_call_id: "call_1", content: "done" },
+    ]);
+    expect(ctx.state.conversationMessages).toEqual(result.upstreamBody.messages);
+  });
+
+  it("stores the conversation under the response id after a non-streaming response", () => {
+    const ctx = { state: {} };
+    translateResponsesRequestToChat(
+      {
+        model: "kimi-k2.7",
+        instructions: "sys",
+        input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "hello" }] }],
+      },
+      provider,
+      ctx,
+    );
+    translateChatResponseToResponses(
+      {
+        id: "chatcmpl-abc",
+        object: "chat.completion",
+        created: 1,
+        model: "kimi-k3",
+        choices: [
+          {
+            index: 0,
+            message: { role: "assistant", content: "hi there" },
+            finish_reason: "stop",
+          },
+        ],
+      },
+      { model: "kimi-k2.7" },
+      ctx,
+    );
+    expect(getConversationMessages("resp_chatcmpl-abc")).toEqual([
+      { role: "system", content: "sys" },
+      { role: "user", content: [{ type: "text", text: "hello" }] },
+      { role: "assistant", content: "hi there" },
+    ]);
+  });
+
+  it("stores the conversation under the response id after a streaming response completes", () => {
+    const ctx = { state: {} };
+    translateResponsesRequestToChat(
+      {
+        model: "kimi-k2.7",
+        instructions: "sys",
+        input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "hello" }] }],
+      },
+      provider,
+      ctx,
+    );
+    // First delta establishes response id and starts text.
+    translateChatStreamChunkToResponses(
+      ctx,
+      { id: "chatcmpl-stream", object: "chat.completion.chunk", created: 1, model: "kimi-k3", choices: [{ index: 0, delta: { role: "assistant", content: "hi" } }] },
+      { model: "kimi-k2.7" },
+    );
+    // Final delta finishes.
+    translateChatStreamChunkToResponses(
+      ctx,
+      { id: "chatcmpl-stream", object: "chat.completion.chunk", created: 1, model: "kimi-k3", choices: [{ index: 0, delta: { content: " there" }, finish_reason: "stop" }] },
+      { model: "kimi-k2.7" },
+    );
+    expect(getConversationMessages("chatcmpl-stream")).toEqual([
+      { role: "system", content: "sys" },
+      { role: "user", content: [{ type: "text", text: "hello" }] },
+      { role: "assistant", content: "hi there" },
+    ]);
   });
 });

@@ -52,3 +52,32 @@ export function readProxyLogLines(profileName: string, lineCount: number): strin
   const start = Math.max(0, nonEmpty.length - lineCount);
   return nonEmpty.slice(start).join("\n");
 }
+
+export interface ProxyRequestLogEntry {
+  timestamp: string;
+  session_id?: string;
+  method: string;
+  path: string;
+  upstream_url: string;
+  original_body?: unknown;
+  request_body?: unknown;
+  response_status?: number;
+  response_body?: unknown;
+  streaming?: boolean;
+  error?: string;
+}
+
+export function logProxyRequest(profileName: string, entry: ProxyRequestLogEntry): void {
+  const dir = getProxyLogDir(profileName);
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+  const date = new Date().toISOString().slice(0, 10);
+  const filePath = path.join(dir, `requests-${date}.jsonl`);
+  const line = JSON.stringify(entry) + "\n";
+  try {
+    fs.appendFileSync(filePath, line, "utf-8");
+  } catch {
+    // ignore logging failures
+  }
+}
