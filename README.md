@@ -93,6 +93,10 @@ You can override base URL and API key per profile.
 
 For `/v1/responses`, the proxy injects a stable `prompt_cache_key` derived from the Codex session ID or from the profile/provider/model tuple. Prompt cache routing is always enabled for Kimi and Qianwen to maximize token savings.
 
+## Model picker (`/model`)
+
+Codex's `/model` picker renders a bundled OpenAI catalog and never queries custom providers, so codx generates a model catalog for each profile at sync time (`~/.codex/codx/catalogs/<profile>.models.json`) and points the profile config at it via `model_catalog_json`. The catalog lists only the models explicitly configured for the profile (first model is the default). It replaces the bundled OpenAI list entirely and is read at Codex startup — `codx run` always launches a fresh Codex process, so changes apply on the next run.
+
 ## Development
 
 ```bash

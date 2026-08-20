@@ -2,8 +2,9 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import type { Profile } from "../types.js";
-import { readProxyConfig } from "../proxy/config.js";
+import { readProxyConfig, getProviderConfig, getDefaultProviderPresets } from "../proxy/config.js";
 import { reserveProxyPortAsync } from "../proxy/instance-manager.js";
+import { buildModelCatalog, writeModelCatalog, removeModelCatalog } from "./model-catalog.js";
 import * as logger from "../logger.js";
 
 const CODEX_HOME = process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
@@ -97,6 +98,7 @@ export function generateNativeProfileContent(
     models?: string[];
     modelProvider: string;
     openaiBaseUrl: string;
+    modelCatalogJson?: string;
   },
 ): string {
   const lines: string[] = [
@@ -105,6 +107,9 @@ export function generateNativeProfileContent(
     `model_provider = "${escapeTomlString(data.modelProvider)}"`,
     `openai_base_url = "${escapeTomlString(data.openaiBaseUrl)}"`,
   ];
+  if (data.modelCatalogJson) {
+    lines.push(`model_catalog_json = "${escapeTomlString(data.modelCatalogJson)}"`);
+  }
   const models = data.models ?? [];
   if (models.length > 0) {
     lines.push(`model = "${escapeTomlString(models[0])}"`);
@@ -312,15 +317,41 @@ export async function syncNativeProfile(
     : profile.model
       ? [profile.model]
       : [];
+
+  // Build a model catalog so the Codex `/model` picker lists this profile's
+  // models instead of the bundled OpenAI catalog. Codex only reads
+  // `model_catalog_json` at startup; `codx run` always spawns a fresh Codex
+  // process, so the generated file is picked up on every launch.
+  let modelCatalogJson: string | undefined;
+  const provider = profile.provider
+    ? (getProviderConfig(profile.provider) ?? getDefaultProviderPresets()[profile.provider])
+    : undefined;
+  if (models.length > 0 || (provider?.models?.length ?? 0) > 0) {
+    try {
+      const catalog = buildModelCatalog(models, provider);
+      modelCatalogJson = writeModelCatalog(name, catalog);
+    } catch (err) {
+      logger.warn(`Could not write model catalog for profile '${name}'; /model picker will use the bundled catalog`, err);
+    }
+  }
+
   const generated = generateNativeProfileContent(name, {
     modelProvider: "openai",
     openaiBaseUrl: baseUrl,
     models,
+    modelCatalogJson,
   });
 
   // Merge generated routing keys on top of the existing profile file.
   // Existing keys are overwritten; user-added keys/sections are preserved.
   let content = mergeTomlContents(existingContent, generated);
+
+  if (!modelCatalogJson) {
+    // No catalog for this profile: drop any previously generated key and file
+    // so Codex falls back to its bundled catalog.
+    content = content.replace(/^\s*model_catalog_json\s*=.*\n?/m, "");
+    removeModelCatalog(name);
+  }
 
   // Chat-Completions providers must have remote_compaction_v2 disabled.
   if (isChatCompletionsProvider(profile)) {
@@ -341,6 +372,7 @@ export function removeNativeProfile(name: string): void {
       logger.warn(`failed to remove profile config '${name}'`, err);
     }
   }
+  removeModelCatalog(name);
 }
 
 /**
