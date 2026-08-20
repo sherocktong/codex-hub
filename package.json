@@ -1,6 +1,6 @@
 {
   "name": "codx-hub-cli",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "Manage Codex CLI profiles, hooks, sessions, and providers",
   "type": "module",
   "bin": {
