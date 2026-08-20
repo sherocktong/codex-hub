@@ -300,19 +300,27 @@ export async function syncNativeProfile(
 
   const filePath = getNativeProfilePath(name);
 
-  // The profile file only needs the codex-hub routing keys. Codex CLI layers
-  // this file on top of config.toml, so shared defaults (theme, MCP servers,
-  // project trust levels) remain in config.toml and are not duplicated here.
+  // Preserve any existing user settings in the profile file. codx only owns
+  // the routing keys needed to point Codex CLI at the local provider proxy;
+  // everything else the user may have added is kept intact.
+  const existingContent = fs.existsSync(filePath)
+    ? fs.readFileSync(filePath, "utf-8")
+    : "";
+
   const models = profile.models?.length
     ? profile.models
     : profile.model
       ? [profile.model]
       : [];
-  let content = generateNativeProfileContent(name, {
+  const generated = generateNativeProfileContent(name, {
     modelProvider: "openai",
     openaiBaseUrl: baseUrl,
     models,
   });
+
+  // Merge generated routing keys on top of the existing profile file.
+  // Existing keys are overwritten; user-added keys/sections are preserved.
+  let content = mergeTomlContents(existingContent, generated);
 
   // Chat-Completions providers must have remote_compaction_v2 disabled.
   if (isChatCompletionsProvider(profile)) {
