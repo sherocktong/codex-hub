@@ -122,8 +122,8 @@ describe("profile-syncer", () => {
     const content = fs.readFileSync(filePath, "utf-8");
     expect(content).toContain(`openai_base_url = "http://${proxyConfigData.listenAddress}:57042/v1"`);
     expect(content).toContain('models = ["qwen-max"]');
-    expect(content).toContain("model_context_window = 128000");
-    expect(content).toContain("model_auto_compact_token_limit = 115200");
+    expect(content).toContain("model_context_window = 64000");
+    expect(content).toContain("model_auto_compact_token_limit = 57600");
   });
 
   it("reserves a proxy port when syncing without URL or persisted port", async () => {
