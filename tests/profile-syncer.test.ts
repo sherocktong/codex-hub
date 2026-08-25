@@ -65,6 +65,8 @@ describe("profile-syncer", () => {
     expect(content).toContain(
       'models = ["kimi-k2-6", "kimi-k2-7", "kimi-k2-5-coding"]',
     );
+    expect(content).toContain("model_context_window = 262144");
+    expect(content).toContain("model_auto_compact_token_limit = 235929");
   });
 
   it("syncs native profile file with an explicit URL", () => {
@@ -79,6 +81,8 @@ describe("profile-syncer", () => {
     expect(content).toContain('openai_base_url = "http://127.0.0.1:1234/v1"');
     expect(content).toContain('model = "kimi-k2-5-coding"');
     expect(content).toContain('models = ["kimi-k2-5-coding"]');
+    expect(content).toContain("model_context_window = 262144");
+    expect(content).toContain("model_auto_compact_token_limit = 235929");
     expect(content).toContain("[features]");
     expect(content).toContain("remote_compaction_v2 = false");
     expect(content).not.toContain("[mcp_servers.node_repl]");
@@ -118,6 +122,8 @@ describe("profile-syncer", () => {
     const content = fs.readFileSync(filePath, "utf-8");
     expect(content).toContain(`openai_base_url = "http://${proxyConfigData.listenAddress}:57042/v1"`);
     expect(content).toContain('models = ["qwen-max"]');
+    expect(content).toContain("model_context_window = 128000");
+    expect(content).toContain("model_auto_compact_token_limit = 115200");
   });
 
   it("reserves a proxy port when syncing without URL or persisted port", async () => {

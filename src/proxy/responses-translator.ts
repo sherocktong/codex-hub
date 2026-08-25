@@ -1226,6 +1226,30 @@ export function translateChatStreamChunkToResponses(
   if (!firstChoice && chunk.usage !== undefined) {
     if (ctx.state.completedEmitted) return [];
     ctx.state.completedEmitted = true;
+
+    const pending = ctx.state.pendingCompletion as Record<string, unknown> | undefined;
+    if (pending) {
+      const pendingResponseId = (pending.responseId as string) ?? responseId;
+      const response = createResponseObject(
+        pendingResponseId,
+        (pending.model as string) ?? model,
+        (pending.createdAt as number) ?? createdAt,
+        (pending.completionStatus as string) ?? "completed",
+        translateUsage(chunk.usage as Record<string, unknown>),
+      );
+      if (pending.finishReason === "length") {
+        response.incomplete_details = { reason: "max_output_tokens" };
+      }
+      persistStreamingConversation(ctx, pendingResponseId);
+      delete ctx.state.pendingCompletion;
+      return [
+        {
+          type: "response.completed",
+          response,
+        },
+      ];
+    }
+
     persistStreamingConversation(ctx, responseId);
     return [
       {
@@ -1444,29 +1468,88 @@ export function translateChatStreamChunkToResponses(
     }
 
     // Kimi puts usage inside the final choice, not as a separate chunk.
-    const finishUsage = (chunk.usage ?? firstChoice?.usage) as Record<string, unknown> | undefined;
+    const chunkUsage = chunk.usage;
+    const finishUsage = (chunkUsage ?? firstChoice?.usage) as Record<string, unknown> | undefined;
     const completionStatus = responseStatusFromFinishReason(finishReason);
     if (!ctx.state.completedEmitted) {
-      ctx.state.completedEmitted = true;
-      persistStreamingConversation(ctx, responseId);
-      const response = createResponseObject(
-        responseId,
-        model,
-        createdAt,
-        completionStatus,
-        finishUsage !== undefined ? translateUsage(finishUsage) : null,
-      );
-      if (finishReason === "length") {
-        response.incomplete_details = { reason: "max_output_tokens" };
+      if (finishUsage !== undefined) {
+        ctx.state.completedEmitted = true;
+        persistStreamingConversation(ctx, responseId);
+        const response = createResponseObject(
+          responseId,
+          model,
+          createdAt,
+          completionStatus,
+          translateUsage(finishUsage),
+        );
+        if (finishReason === "length") {
+          response.incomplete_details = { reason: "max_output_tokens" };
+        }
+        events.push({
+          type: "response.completed",
+          response,
+        });
+      } else if (chunkUsage === null) {
+        // Some providers (e.g. Qwen) send an explicit `usage: null` on the
+        // finish chunk and then deliver the real usage in a separate chunk.
+        // Defer completion until that usage chunk arrives.
+        ctx.state.pendingCompletion = {
+          responseId,
+          model,
+          createdAt,
+          completionStatus,
+          finishReason,
+        };
+      } else {
+        // No usage present and none expected; finalize immediately.
+        ctx.state.completedEmitted = true;
+        persistStreamingConversation(ctx, responseId);
+        const response = createResponseObject(responseId, model, createdAt, completionStatus, null);
+        if (finishReason === "length") {
+          response.incomplete_details = { reason: "max_output_tokens" };
+        }
+        events.push({
+          type: "response.completed",
+          response,
+        });
       }
-      events.push({
-        type: "response.completed",
-        response,
-      });
     }
   }
 
   return events;
+}
+
+/**
+ * Flush any deferred response completion at the end of a translated stream.
+ * Providers such as Qwen emit `finish_reason` before the final usage-only chunk;
+ * if that chunk never arrives, emit the completion without usage so Codex does
+ * not hang waiting for a terminal event.
+ */
+export function flushChatStreamToResponses(ctx: { state: Record<string, unknown> }): Record<string, unknown>[] {
+  const pending = ctx.state.pendingCompletion as Record<string, unknown> | undefined;
+  if (!pending || ctx.state.completedEmitted) {
+    return [];
+  }
+
+  ctx.state.completedEmitted = true;
+  const responseId = (pending.responseId as string) ?? "resp_0";
+  const model = (pending.model as string) ?? "";
+  const createdAt = (pending.createdAt as number) ?? Math.floor(Date.now() / 1000);
+  const completionStatus = (pending.completionStatus as string) ?? "completed";
+  const finishReason = pending.finishReason as string | undefined;
+
+  persistStreamingConversation(ctx, responseId);
+  const response = createResponseObject(responseId, model, createdAt, completionStatus, null);
+  if (finishReason === "length") {
+    response.incomplete_details = { reason: "max_output_tokens" };
+  }
+  delete ctx.state.pendingCompletion;
+  return [
+    {
+      type: "response.completed",
+      response,
+    },
+  ];
 }
 
 function persistStreamingConversation(

@@ -38,9 +38,45 @@ export interface ModelsResponse {
   models: ModelInfo[];
 }
 
+interface ModelContextWindow {
+  slug: string;
+  contextWindow: number;
+}
+
+/**
+ * Per-model context windows. Exact model slugs take precedence over the
+ * provider fallbacks in DEFAULT_CONTEXT_WINDOWS below.
+ */
+const MODEL_CONTEXT_WINDOWS: readonly ModelContextWindow[] = [
+  // Kimi K2.x series: 256K tokens
+  { slug: "kimi-k2-6", contextWindow: 262144 },
+  { slug: "kimi-k2-7", contextWindow: 262144 },
+  { slug: "kimi-k2-5-coding", contextWindow: 262144 },
+  // Kimi K3: advertised as 1M, but the default Kimi Code tier (Moderato)
+  // exposes a 256K effective window. Use 256K so context remaining stays
+  // meaningful; users on the 1M Allegretto+ tier can override via provider
+  // config if a future override option is added.
+  { slug: "kimi-k3", contextWindow: 262144 },
+  // Qianwen / Qwen
+  { slug: "qwen3.8-max-preview", contextWindow: 128000 },
+  { slug: "qwen-max", contextWindow: 128000 },
+];
+
 const DEFAULT_CONTEXT_WINDOWS: Record<string, number> = {
-  kimi: 258400,
+  kimi: 262144,
+  qianwen: 128000,
 };
+
+function getContextWindow(slug: string, providerType?: string): number | undefined {
+  const match = MODEL_CONTEXT_WINDOWS.find((entry) => entry.slug === slug);
+  if (match) {
+    return match.contextWindow;
+  }
+  if (providerType) {
+    return DEFAULT_CONTEXT_WINDOWS[providerType];
+  }
+  return undefined;
+}
 
 function getCatalogDir(): string {
   const base = process.env.CODX_PROXY_CONFIG_DIR || path.join(os.homedir(), ".codex", "codx");
@@ -97,9 +133,11 @@ export function buildModelCatalog(
       slugs.push(slug);
     }
   }
-  const contextWindow = provider ? DEFAULT_CONTEXT_WINDOWS[provider.type] : undefined;
   return {
-    models: slugs.map((slug, index) => buildModelInfo(slug, index + 1, contextWindow)),
+    models: slugs.map((slug, index) => {
+      const contextWindow = provider ? getContextWindow(slug, provider.type) : getContextWindow(slug);
+      return buildModelInfo(slug, index + 1, contextWindow);
+    }),
   };
 }
 

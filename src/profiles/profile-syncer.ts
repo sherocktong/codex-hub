@@ -40,7 +40,7 @@ export function generateDefaultBaseConfig(): string {
   return [
     `theme = "Catppuccin Latte"`,
     "",
-    `# Context window for kimi-k2.7 (258400 tokens). Auto-compact before hitting the limit.`,
+    `# Base context window fallback. Per-model catalogs and profile configs override this.`,
     `model_context_window = 258400`,
     `model_auto_compact_token_limit = 230000`,
     "",
@@ -99,6 +99,7 @@ export function generateNativeProfileContent(
     modelProvider: string;
     openaiBaseUrl: string;
     modelCatalogJson?: string;
+    contextWindow?: number;
   },
 ): string {
   const lines: string[] = [
@@ -114,6 +115,10 @@ export function generateNativeProfileContent(
   if (models.length > 0) {
     lines.push(`model = "${escapeTomlString(models[0])}"`);
     lines.push(`models = ${toTomlArray(models)}`);
+  }
+  if (data.contextWindow !== undefined && data.contextWindow > 0) {
+    lines.push(`model_context_window = ${data.contextWindow}`);
+    lines.push(`model_auto_compact_token_limit = ${Math.floor(data.contextWindow * 0.9)}`);
   }
   return lines.join("\n") + "\n";
 }
@@ -323,6 +328,7 @@ export async function syncNativeProfile(
   // `model_catalog_json` at startup; `codx run` always spawns a fresh Codex
   // process, so the generated file is picked up on every launch.
   let modelCatalogJson: string | undefined;
+  let contextWindow: number | undefined;
   const provider = profile.provider
     ? (getProviderConfig(profile.provider) ?? getDefaultProviderPresets()[profile.provider])
     : undefined;
@@ -330,6 +336,7 @@ export async function syncNativeProfile(
     try {
       const catalog = buildModelCatalog(models, provider);
       modelCatalogJson = writeModelCatalog(name, catalog);
+      contextWindow = catalog.models[0]?.context_window;
     } catch (err) {
       logger.warn(`Could not write model catalog for profile '${name}'; /model picker will use the bundled catalog`, err);
     }
@@ -340,6 +347,7 @@ export async function syncNativeProfile(
     openaiBaseUrl: baseUrl,
     models,
     modelCatalogJson,
+    contextWindow,
   });
 
   // Merge generated routing keys on top of the existing profile file.

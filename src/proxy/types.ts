@@ -49,6 +49,7 @@ export interface ProviderAdapter {
     ctx: RequestContext,
     chunk: Record<string, unknown>,
   ): Record<string, unknown> | Record<string, unknown>[];
+  flushStream?(ctx: RequestContext): Record<string, unknown> | Record<string, unknown>[];
   parseUsage?(chunk: Record<string, unknown>): TokenUsage | undefined;
   supportsPromptCacheRouting: boolean;
   translateError?(response: Response, bodyText: string): Promise<Response | undefined>;

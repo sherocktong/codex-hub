@@ -7,6 +7,7 @@ import {
   translateResponsesRequestToChat,
   translateChatResponseToResponses,
   translateChatStreamChunkToResponses,
+  flushChatStreamToResponses,
 } from "../responses-translator.js";
 
 export const qianwenAdapter: ProviderAdapter = {
@@ -135,5 +136,15 @@ export const qianwenAdapter: ProviderAdapter = {
       return translateChatStreamChunkToResponses(ctx, chunk, ctx.body);
     }
     return chunk;
+  },
+
+  flushStream(ctx: RequestContext): Record<string, unknown> | Record<string, unknown>[] {
+    const translateResponses =
+      shouldTranslateResponsesToChat(ctx.provider) &&
+      (ctx.path === "/v1/responses" || ctx.path === "/v1/responses/compact");
+    if (translateResponses) {
+      return flushChatStreamToResponses(ctx);
+    }
+    return [];
   },
 };

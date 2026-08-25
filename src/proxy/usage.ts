@@ -75,9 +75,63 @@ async function parseResponseUsage(response: Response): Promise<TokenUsage | unde
   }
 }
 
-export async function logRequest(ctx: RequestContext, response: Response): Promise<void> {
+/**
+ * Extract token usage from a single streaming event. Supports both the Codex
+ * Responses API (`response.completed` with `input_tokens/output_tokens`) and the
+ * OpenAI Chat Completions format (`usage.prompt_tokens/completion_tokens`).
+ */
+export function extractStreamUsage(event: Record<string, unknown>): TokenUsage | undefined {
+  const eventType = typeof event.type === "string" ? event.type : undefined;
+  const response = (event.response as Record<string, unknown>) ?? {};
+  let usage: Record<string, unknown> | undefined;
+
+  if (eventType === "response.completed" && response.usage) {
+    usage = response.usage as Record<string, unknown>;
+  } else if (event.usage) {
+    usage = event.usage as Record<string, unknown>;
+  }
+
+  if (!usage) {
+    return undefined;
+  }
+
+  let inputTokens: number | undefined;
+  let outputTokens: number | undefined;
+  if (typeof usage.input_tokens === "number") {
+    inputTokens = usage.input_tokens;
+    outputTokens = typeof usage.output_tokens === "number" ? usage.output_tokens : 0;
+  } else if (typeof usage.prompt_tokens === "number") {
+    inputTokens = usage.prompt_tokens;
+    outputTokens = typeof usage.completion_tokens === "number" ? usage.completion_tokens : 0;
+  }
+
+  if (inputTokens === undefined || (inputTokens === 0 && outputTokens === 0)) {
+    return undefined;
+  }
+
+  let cacheReadTokens = 0;
+  let cacheCreationTokens = 0;
+  const inputDetails = usage.input_tokens_details as Record<string, unknown> | undefined;
+  if (inputDetails) {
+    if (typeof inputDetails.cached_tokens === "number") cacheReadTokens = inputDetails.cached_tokens;
+    if (typeof inputDetails.cache_write_tokens === "number") cacheCreationTokens = inputDetails.cache_write_tokens;
+  }
+  const promptDetails = usage.prompt_tokens_details as Record<string, unknown> | undefined;
+  if (promptDetails) {
+    if (typeof promptDetails.cached_tokens === "number") cacheReadTokens = promptDetails.cached_tokens;
+    if (typeof promptDetails.cache_write_tokens === "number") cacheCreationTokens = promptDetails.cache_write_tokens;
+  }
+
+  return { inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens };
+}
+
+export async function logRequest(
+  ctx: RequestContext,
+  response: Response,
+  usage?: TokenUsage,
+): Promise<void> {
   const streamed = !!ctx.body.stream;
-  const usage = await parseResponseUsage(response);
+  const resolvedUsage = usage ?? (await parseResponseUsage(response));
   const durationMs = Date.now() - ctx.startTime;
 
   const entry: UsageEntry = {
@@ -89,11 +143,11 @@ export async function logRequest(ctx: RequestContext, response: Response): Promi
     path: ctx.path,
     method: ctx.method,
     streamed,
-    inputTokens: usage?.inputTokens ?? 0,
-    outputTokens: usage?.outputTokens ?? 0,
-    cacheReadTokens: usage?.cacheReadTokens ?? 0,
-    cacheCreationTokens: usage?.cacheCreationTokens ?? 0,
-    costUsd: usage ? computeCost(ctx.provider.id, usage) : undefined,
+    inputTokens: resolvedUsage?.inputTokens ?? 0,
+    outputTokens: resolvedUsage?.outputTokens ?? 0,
+    cacheReadTokens: resolvedUsage?.cacheReadTokens ?? 0,
+    cacheCreationTokens: resolvedUsage?.cacheCreationTokens ?? 0,
+    costUsd: resolvedUsage ? computeCost(ctx.provider.id, resolvedUsage) : undefined,
     durationMs,
     attempt: ctx.attempt,
     sessionId: ctx.sessionId,

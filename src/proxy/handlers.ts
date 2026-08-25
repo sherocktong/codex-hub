@@ -8,7 +8,8 @@ import type { ProxyInstanceConfig, ProviderAdapter, RequestContext } from "./typ
 import { parseSseBlock, serializeSseBlock, splitSseBlocks, appendUtf8Safe } from "./sse.js";
 import { translateResponsesRequestToChat, translateUsage } from "./responses-translator.js";
 import { getAdapter } from "./providers/index.js";
-import { logRequest } from "./usage.js";
+import { logRequest, extractStreamUsage } from "./usage.js";
+import type { TokenUsage } from "./types.js";
 
 export function createRequestHandler(config: ProxyInstanceConfig): RequestHandlerWithUpgrade {
   const forwarder = createForwarder(config.profileName, config.providers[0]);
@@ -103,8 +104,8 @@ export function createRequestHandler(config: ProxyInstanceConfig): RequestHandle
         res.writeHead(response.status, Object.fromEntries(response.headers.entries()));
 
         if (isStream && response.body) {
-          await logRequest(ctx, response);
-          await pipeStream(res, response.body, adapter, ctx);
+          const streamUsage = await pipeStream(res, response.body, adapter, ctx);
+          await logRequest(ctx, response, streamUsage);
         } else {
           await logRequest(ctx, response);
           const resBody = await response.arrayBuffer();
@@ -363,11 +364,11 @@ function handleWebSocketConnection(
       const adapter = getAdapter(provider);
 
       if (body.stream && response.body) {
-        await logRequest(ctx, response);
         const reader = response.body.getReader();
         activeReader = reader;
         try {
-          await pipeWebSocketStream(ws, reader, adapter, ctx);
+          const streamUsage = await pipeWebSocketStream(ws, reader, adapter, ctx);
+          await logRequest(ctx, response, streamUsage);
         } finally {
           reader.releaseLock();
           if (activeReader === reader) {
@@ -422,9 +423,10 @@ async function pipeStream(
   body: ReadableStream<Uint8Array>,
   adapter: ProviderAdapter,
   ctx: RequestContext,
-): Promise<void> {
+): Promise<TokenUsage | undefined> {
   const reader = body.getReader();
   let buffer = "";
+  let streamUsage: TokenUsage | undefined;
   try {
     while (true) {
       const { done, value } = await reader.read();
@@ -449,11 +451,13 @@ async function pipeStream(
 
         try {
           const parsed = JSON.parse(fields.data) as Record<string, unknown>;
+          logger.debug(`upstream chunk [${ctx.profileName}]: ${fields.data}`);
           const transformed = adapter.transformStreamChunk
             ? adapter.transformStreamChunk(ctx, parsed)
             : parsed;
           const events = Array.isArray(transformed) ? transformed : [transformed];
           for (const event of events) {
+            streamUsage = extractStreamUsage(event) ?? streamUsage;
             res.write(serializeSseBlock({ data: JSON.stringify(event) }));
           }
         } catch (err) {
@@ -473,14 +477,23 @@ async function pipeStream(
             }),
           );
           res.end();
-          return;
+          return streamUsage;
         }
       }
+    }
+
+    const flushEvents = adapter.flushStream ? adapter.flushStream(ctx) : [];
+    const events = Array.isArray(flushEvents) ? flushEvents : [flushEvents];
+    for (const event of events) {
+      streamUsage = extractStreamUsage(event) ?? streamUsage;
+      res.write(serializeSseBlock({ data: JSON.stringify(event) }));
     }
   } finally {
     reader.releaseLock();
     res.end();
   }
+
+  return streamUsage;
 }
 
 async function pipeWebSocketStream(
@@ -488,8 +501,9 @@ async function pipeWebSocketStream(
   reader: ReadableStreamDefaultReader<Uint8Array>,
   adapter: ProviderAdapter,
   ctx: RequestContext,
-): Promise<void> {
+): Promise<TokenUsage | undefined> {
   let buffer = "";
+  let streamUsage: TokenUsage | undefined;
 
   try {
     while (ws.readyState === WebSocket.OPEN) {
@@ -508,11 +522,13 @@ async function pipeWebSocketStream(
 
         try {
           const parsed = JSON.parse(fields.data) as Record<string, unknown>;
+          logger.debug(`upstream chunk [${ctx.profileName}]: ${fields.data}`);
           const transformed = adapter.transformStreamChunk
             ? adapter.transformStreamChunk(ctx, parsed)
             : parsed;
           const events = Array.isArray(transformed) ? transformed : [transformed];
           for (const event of events) {
+            streamUsage = extractStreamUsage(event) ?? streamUsage;
             if (ws.readyState === WebSocket.OPEN) {
               ws.send(JSON.stringify(event));
             }
@@ -534,11 +550,22 @@ async function pipeWebSocketStream(
             );
           }
           ws.close();
-          return;
+          return streamUsage;
         }
+      }
+    }
+
+    const flushEvents = adapter.flushStream ? adapter.flushStream(ctx) : [];
+    const events = Array.isArray(flushEvents) ? flushEvents : [flushEvents];
+    for (const event of events) {
+      streamUsage = extractStreamUsage(event) ?? streamUsage;
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify(event));
       }
     }
   } finally {
     reader.releaseLock();
   }
+
+  return streamUsage;
 }

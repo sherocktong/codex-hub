@@ -28,7 +28,7 @@ describe("model-catalog", () => {
   });
 
   it("buildModelInfo fills required ModelInfo fields with picker-safe defaults", () => {
-    const info = catalog.buildModelInfo("kimi-k2-6", 1, 258400);
+    const info = catalog.buildModelInfo("kimi-k2-6", 1, 262144);
     expect(info.slug).toBe("kimi-k2-6");
     expect(info.display_name).toBe("kimi-k2-6");
     expect(info.visibility).toBe("list");
@@ -40,15 +40,36 @@ describe("model-catalog", () => {
     expect(info.default_reasoning_level).toBe("medium");
     expect(info.truncation_policy).toEqual({ mode: "tokens", limit: 10000 });
     expect(info.experimental_supported_tools).toEqual([]);
-    expect(info.context_window).toBe(258400);
-    expect(info.max_context_window).toBe(258400);
+    expect(info.context_window).toBe(262144);
+    expect(info.max_context_window).toBe(262144);
     expect(info.input_modalities).toEqual(["text"]);
     expect(info.supports_parallel_tool_calls).toBe(false);
     expect(info.base_instructions).toBe("");
   });
 
-  it("buildModelCatalog only lists profile models, using provider type for context window", () => {
-    const result = catalog.buildModelCatalog(["kimi-k2-7", "kimi-k2-6"], {
+  it("buildModelCatalog assigns per-model context windows for known Kimi and Qwen slugs", () => {
+    const result = catalog.buildModelCatalog(
+      ["kimi-k3", "kimi-k2-7", "kimi-k2-6", "kimi-k2-5-coding", "qwen3.8-max-preview", "qwen-max"],
+      {
+        id: "kimi",
+        type: "kimi",
+        name: "Kimi",
+        baseUrl: "https://api.kimi.com/coding",
+        apiKey: "",
+        models: ["kimi-k2-6", "kimi-k3"],
+      },
+    );
+    const bySlug = Object.fromEntries(result.models.map((m) => [m.slug, m.context_window]));
+    expect(bySlug["kimi-k3"]).toBe(262144);
+    expect(bySlug["kimi-k2-7"]).toBe(262144);
+    expect(bySlug["kimi-k2-6"]).toBe(262144);
+    expect(bySlug["kimi-k2-5-coding"]).toBe(262144);
+    expect(bySlug["qwen3.8-max-preview"]).toBe(128000);
+    expect(bySlug["qwen-max"]).toBe(128000);
+  });
+
+  it("buildModelCatalog falls back to the provider context window for unknown slugs", () => {
+    const result = catalog.buildModelCatalog(["kimi-unknown"], {
       id: "kimi",
       type: "kimi",
       name: "Kimi",
@@ -56,9 +77,7 @@ describe("model-catalog", () => {
       apiKey: "",
       models: ["kimi-k2-6", "kimi-k3"],
     });
-    expect(result.models.map((m) => m.slug)).toEqual(["kimi-k2-7", "kimi-k2-6"]);
-    expect(result.models.map((m) => m.priority)).toEqual([1, 2]);
-    expect(result.models[0].context_window).toBe(258400);
+    expect(result.models[0].context_window).toBe(262144);
   });
 
   it("buildModelCatalog without a provider omits context window", () => {
