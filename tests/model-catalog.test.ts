@@ -64,8 +64,8 @@ describe("model-catalog", () => {
     expect(bySlug["kimi-k2-7"]).toBe(262144);
     expect(bySlug["kimi-k2-6"]).toBe(262144);
     expect(bySlug["kimi-k2-5-coding"]).toBe(262144);
-    expect(bySlug["qwen3.8-max-preview"]).toBe(128000);
-    expect(bySlug["qwen-max"]).toBe(128000);
+    expect(bySlug["qwen3.8-max-preview"]).toBe(64000);
+    expect(bySlug["qwen-max"]).toBe(64000);
   });
 
   it("buildModelCatalog falls back to the provider context window for unknown slugs", () => {
