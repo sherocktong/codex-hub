@@ -64,7 +64,7 @@ describe("model-catalog", () => {
     expect(bySlug["kimi-k2-7"]).toBe(262144);
     expect(bySlug["kimi-k2-6"]).toBe(262144);
     expect(bySlug["kimi-k2-5-coding"]).toBe(262144);
-    expect(bySlug["qwen3.8-max-preview"]).toBe(64000);
+    expect(bySlug["qwen3.8-max-preview"]).toBe(256000);
     expect(bySlug["qwen-max"]).toBe(64000);
   });
 

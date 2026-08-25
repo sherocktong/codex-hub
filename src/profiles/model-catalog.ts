@@ -57,9 +57,10 @@ const MODEL_CONTEXT_WINDOWS: readonly ModelContextWindow[] = [
   // meaningful; users on the 1M Allegretto+ tier can override via provider
   // config if a future override option is added.
   { slug: "kimi-k3", contextWindow: 262144 },
-  // Qianwen / Qwen: advertised 128K, but use 64K as the effective window so
+  // Qianwen / Qwen 3.8 Max Preview: use the full 256K advertised window.
+  { slug: "qwen3.8-max-preview", contextWindow: 256000 },
+  // Qianwen / Qwen Max: keep the previously tested 64K effective window so
   // context remaining stays meaningful in the Codex TUI.
-  { slug: "qwen3.8-max-preview", contextWindow: 64000 },
   { slug: "qwen-max", contextWindow: 64000 },
 ];
 
