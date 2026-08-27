@@ -42,7 +42,6 @@ export function generateDefaultBaseConfig(): string {
     "",
     `# Base context window fallback. Per-model catalogs and profile configs override this.`,
     `model_context_window = 258400`,
-    `model_auto_compact_token_limit = 230000`,
     "",
     `notify = ${toTomlArray([computerUseBinary, "turn-ended"])}`,
     "",
@@ -118,7 +117,6 @@ export function generateNativeProfileContent(
   }
   if (data.contextWindow !== undefined && data.contextWindow > 0) {
     lines.push(`model_context_window = ${data.contextWindow}`);
-    lines.push(`model_auto_compact_token_limit = ${Math.floor(data.contextWindow * 0.9)}`);
   }
   return lines.join("\n") + "\n";
 }
