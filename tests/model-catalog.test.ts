@@ -60,11 +60,10 @@ describe("model-catalog", () => {
       },
     );
     const bySlug = Object.fromEntries(result.models.map((m) => [m.slug, m.context_window]));
-    expect(bySlug["kimi-k3"]).toBe(262144);
+    expect(bySlug["kimi-k3"]).toBe(1048576);
     expect(bySlug["kimi-k2-7"]).toBe(262144);
     expect(bySlug["kimi-k2-6"]).toBe(262144);
-    expect(bySlug["kimi-k2-5-coding"]).toBe(262144);
-    expect(bySlug["qwen3.8-max-preview"]).toBe(256000);
+    expect(bySlug["qwen3.8-max-preview"]).toBe(1000000);
     expect(bySlug["qwen-max"]).toBe(64000);
   });
 

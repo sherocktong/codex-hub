@@ -600,6 +600,60 @@ describe("responses-to-chat-completions translator", () => {
     expect(finalChunk?.some((e) => e.type === "response.completed")).toBe(true);
   });
 
+  it("preserves tool-call call_id when later deltas send an empty id", () => {
+    const ctx = { state: {} };
+    const originalBody = { model: "qwen3.8-max" };
+
+    translateChatStreamChunkToResponses(
+      ctx,
+      { id: "chatcmpl-empty-id", created: 1234567890, choices: [{ delta: { role: "assistant" } }] },
+      originalBody,
+    );
+
+    const firstDelta = translateChatStreamChunkToResponses(
+      ctx,
+      {
+        id: "chatcmpl-empty-id",
+        created: 1234567890,
+        choices: [
+          {
+            delta: {
+              tool_calls: [
+                { index: 0, id: "call_abc", type: "function", function: { name: "calculator", arguments: "" } },
+              ],
+            },
+          },
+        ],
+      },
+      originalBody,
+    );
+    const added = firstDelta?.find((e) => e.type === "response.output_item.added") as
+      | Record<string, unknown>
+      | undefined;
+    expect((added?.item as Record<string, unknown> | undefined)?.call_id).toBe("call_abc");
+
+    const secondDelta = translateChatStreamChunkToResponses(
+      ctx,
+      {
+        id: "chatcmpl-empty-id",
+        created: 1234567890,
+        choices: [{ delta: { tool_calls: [{ index: 0, id: "", function: { arguments: "{}" } }] } }],
+      },
+      originalBody,
+    );
+    expect(secondDelta?.some((e) => e.type === "response.function_call_arguments.delta")).toBe(true);
+
+    const finalChunk = translateChatStreamChunkToResponses(
+      ctx,
+      { id: "chatcmpl-empty-id", created: 1234567890, choices: [{ delta: {}, finish_reason: "tool_calls" }] },
+      originalBody,
+    );
+    const done = finalChunk?.find((e) => e.type === "response.function_call_arguments.done") as
+      | Record<string, unknown>
+      | undefined;
+    expect(done?.call_id).toBe("call_abc");
+  });
+
   it("drops streaming tool calls that never receive a function name", () => {
     const ctx = { state: {} };
     const originalBody = { model: "kimi-k2.7" };
@@ -723,6 +777,33 @@ describe("responses-to-chat-completions translator", () => {
     const output = (translated.output as Array<Record<string, unknown>>) ?? [];
     expect(output).toHaveLength(1);
     expect(output[0].name).toBe("calculator");
+  });
+
+  it("generates a stable call_id for non-streaming tool calls with missing ids", () => {
+    const translated = translateChatResponseToResponses(
+      {
+        id: "chatcmpl-nonstream-no-id",
+        created: 1234567890,
+        choices: [
+          {
+            message: {
+              role: "assistant",
+              tool_calls: [
+                { function: { name: "calculator", arguments: "{}" } },
+                { id: "", function: { name: "read_file", arguments: "{}" } },
+              ],
+            },
+            finish_reason: "tool_calls",
+          },
+        ],
+        usage: { prompt_tokens: 10, completion_tokens: 2, total_tokens: 12 },
+      },
+      { model: "qwen3.8-max" },
+    );
+    const output = (translated.output as Array<Record<string, unknown>>) ?? [];
+    expect(output).toHaveLength(2);
+    expect(output[0]).toMatchObject({ type: "function_call", id: "call_0", call_id: "call_0" });
+    expect(output[1]).toMatchObject({ type: "function_call", id: "call_1", call_id: "call_1" });
   });
 
   it("includes prompt cache details in streaming usage", () => {

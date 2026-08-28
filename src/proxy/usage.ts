@@ -122,7 +122,12 @@ export function extractStreamUsage(event: Record<string, unknown>): TokenUsage |
     if (typeof promptDetails.cache_write_tokens === "number") cacheCreationTokens = promptDetails.cache_write_tokens;
   }
 
-  return { inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens };
+  return {
+    inputTokens: inputTokens ?? 0,
+    outputTokens: outputTokens ?? 0,
+    cacheReadTokens,
+    cacheCreationTokens,
+  };
 }
 
 export async function logRequest(

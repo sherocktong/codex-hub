@@ -754,8 +754,9 @@ export function translateChatResponseToResponses(
 
   // Responses API represents function calls as separate output items of type "function_call".
   let droppedToolCallCount = 0;
+  const normalizedToolCalls: Array<Record<string, unknown>> = [];
   if (toolCalls && toolCalls.length > 0) {
-    for (const toolCall of toolCalls) {
+    for (const [index, toolCall] of toolCalls.entries()) {
       const fn = toolCall.function as Record<string, unknown> | undefined;
       const name = (fn?.name as string | undefined) ?? "";
       // Defensive: skip tool calls with missing/empty/placeholder names (some
@@ -765,12 +766,28 @@ export function translateChatResponseToResponses(
         droppedToolCallCount++;
         continue;
       }
+      // Some providers (e.g. Qianwen) omit the tool_call id or leave it empty.
+      // Generate a stable call_id so Codex can correlate outputs.
+      const rawToolCallId =
+        typeof toolCall.id === "string" && (toolCall.id as string).trim() !== ""
+          ? (toolCall.id as string)
+          : undefined;
+      const callId = rawToolCallId ?? `call_${index}`;
+      const arguments_ = canonicalizeToolArguments(fn?.arguments);
+      normalizedToolCalls.push({
+        id: callId,
+        type: "function",
+        function: {
+          name,
+          arguments: arguments_,
+        },
+      });
       output.push({
         type: "function_call",
-        id: toolCall.id as string | undefined,
-        call_id: toolCall.id as string | undefined,
+        id: callId,
+        call_id: callId,
         name,
-        arguments: canonicalizeToolArguments(fn?.arguments),
+        arguments: arguments_,
       });
     }
   }
@@ -817,7 +834,7 @@ export function translateChatResponseToResponses(
   if (ctx) {
     const conversationMessages = ctx.state.conversationMessages as Array<Record<string, unknown>> | undefined;
     if (conversationMessages) {
-      const assistantMessage = buildAssistantChatMessage(message, toolCalls);
+      const assistantMessage = buildAssistantChatMessage(message, normalizedToolCalls);
       setConversationMessages(responseId, [...conversationMessages, assistantMessage]);
     }
   }
@@ -1308,7 +1325,14 @@ export function translateChatStreamChunkToResponses(
     for (const toolCall of toolCallsDelta) {
       const chatIndex = (toolCall.index as number) ?? 0;
       const existing = accumulatedToolCalls[chatIndex] ?? {};
-      const toolCallId = (toolCall.id as string) ?? (existing.id as string) ?? `${responseId}_tool_${chatIndex}`;
+      // Qianwen sends the tool-call id only on the first delta for each call and
+      // repeats "" on later argument deltas. Treat an empty id as missing so we
+      // keep the accumulated id instead of overwriting it with an empty string.
+      const deltaId =
+        typeof toolCall.id === "string" && (toolCall.id as string).trim() !== ""
+          ? (toolCall.id as string)
+          : undefined;
+      const toolCallId = deltaId ?? (existing.id as string) ?? `${responseId}_tool_${chatIndex}`;
       const fn = toolCall.function as Record<string, unknown> | undefined;
       const nameDelta = (fn?.name as string) ?? "";
       const name = nameDelta || ((existing.name as string | undefined) ?? "");
