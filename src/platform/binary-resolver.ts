@@ -16,7 +16,7 @@ export function getCodexVersion(): string {
       encoding: "utf-8",
     });
     if (result.status === 0 && result.stdout) {
-      const match = result.stdout.trim().match(/^(\d+\.\d+\.\d+)/);
+      const match = result.stdout.trim().match(/(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)/);
       if (match) {
         cachedVersion = match[1];
         logger.debug(`binary-resolver: detected Codex version ${cachedVersion}`);
