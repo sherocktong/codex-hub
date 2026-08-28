@@ -49,16 +49,13 @@ interface ModelContextWindow {
  */
 const MODEL_CONTEXT_WINDOWS: readonly ModelContextWindow[] = [
   // Kimi K2.x series: 256K tokens
-  { slug: "kimi-k2-6", contextWindow: 262144 },
-  { slug: "kimi-k2-7", contextWindow: 262144 },
-  { slug: "kimi-k2-5-coding", contextWindow: 262144 },
   // Kimi K3: advertised as 1M, but the default Kimi Code tier (Moderato)
   // exposes a 256K effective window. Use 256K so context remaining stays
   // meaningful; users on the 1M Allegretto+ tier can override via provider
   // config if a future override option is added.
-  { slug: "kimi-k3", contextWindow: 262144 },
+  { slug: "kimi-k3", contextWindow: 1048576 },
   // Qianwen / Qwen 3.8 Max Preview: use the full 256K advertised window.
-  { slug: "qwen3.8-max-preview", contextWindow: 256000 },
+  { slug: "qwen3.8-max-preview", contextWindow: 1000000 },
   // Qianwen / Qwen Max: keep the previously tested 64K effective window so
   // context remaining stays meaningful in the Codex TUI.
   { slug: "qwen-max", contextWindow: 64000 },

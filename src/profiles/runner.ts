@@ -5,7 +5,6 @@ import { acquireProfileProxy } from "../proxy/instance-manager.js";
 import { addRegistryConsumer, removeRegistryConsumer } from "../proxy/proxy-registry.js";
 import {
   syncNativeProfile,
-  activateProfileConfig,
 } from "./profile-syncer.js";
 import * as logger from "../logger.js";
 

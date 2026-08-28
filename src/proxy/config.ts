@@ -84,7 +84,7 @@ export function getDefaultProviderPresets(): Record<string, ProviderConfig> {
       name: "Kimi",
       baseUrl: "https://api.kimi.com/coding",
       apiKey: "",
-      models: ["kimi-k2-6", "kimi-k2-7", "kimi-k3", "kimi-k2-5-coding"],
+      models: ["kimi-k2-6", "kimi-k2-7", "kimi-k3"],
       promptCacheRouting: "enabled",
       responsesToChatCompletions: true,
     },
