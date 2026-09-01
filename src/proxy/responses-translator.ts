@@ -164,6 +164,9 @@ export function translateResponsesRequestToChat(
       ...(upstreamBody.stream_options as Record<string, unknown> | undefined),
       include_usage: true,
     };
+    if (ctx) {
+      ctx.state.expectStreamingUsage = true;
+    }
   }
 
   // Normalize model to a provider-supported model id.
@@ -1513,10 +1516,12 @@ export function translateChatStreamChunkToResponses(
           type: "response.completed",
           response,
         });
-      } else if (chunkUsage === null) {
-        // Some providers (e.g. Qwen) send an explicit `usage: null` on the
-        // finish chunk and then deliver the real usage in a separate chunk.
-        // Defer completion until that usage chunk arrives.
+      } else if ((chunkUsage === undefined || chunkUsage === null) && ctx.state.expectStreamingUsage) {
+        // OpenAI sends the finish chunk with `usage` omitted, then delivers
+        // the real usage in a separate `choices: []` chunk. Some providers
+        // (e.g. Qwen) send an explicit `usage: null` instead. When we asked
+        // for streaming usage, defer completion until that chunk arrives so
+        // Codex receives accurate counts.
         ctx.state.pendingCompletion = {
           responseId,
           model,

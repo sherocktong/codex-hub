@@ -533,6 +533,44 @@ describe("responses-to-chat-completions translator", () => {
     expect((events[0].response as Record<string, unknown>).output).toEqual([]);
   });
 
+  it("defers response.completed on OpenAI-style finish chunk without usage and emits it on the usage chunk", () => {
+    const ctx = { state: { accumulatedText: "Hello world", expectStreamingUsage: true } };
+    const originalBody = { model: "kimi-k2.7" };
+
+    const finishChunk = translateChatStreamChunkToResponses(
+      ctx,
+      {
+        id: "chatcmpl-123",
+        created: 1234567890,
+        choices: [{ delta: {}, finish_reason: "stop" }],
+      },
+      originalBody,
+    );
+    expect(finishChunk?.some((e) => e.type === "response.completed")).toBe(false);
+    expect(ctx.state.pendingCompletion).toBeDefined();
+
+    const usageChunk = translateChatStreamChunkToResponses(
+      ctx,
+      {
+        id: "chatcmpl-123",
+        created: 1234567890,
+        choices: [],
+        usage: { prompt_tokens: 10, completion_tokens: 2, total_tokens: 12 },
+      },
+      originalBody,
+    );
+    expect(usageChunk).toHaveLength(1);
+    expect(usageChunk?.[0].type).toBe("response.completed");
+    const response = (usageChunk?.[0] as Record<string, unknown>).response as Record<string, unknown>;
+    expect(response.status).toBe("completed");
+    expect(response.usage).toMatchObject({
+      input_tokens: 10,
+      output_tokens: 2,
+      total_tokens: 12,
+    });
+    expect(ctx.state.completedEmitted).toBe(true);
+  });
+
   it("translates streaming tool call chunks to function_call events", () => {
     const ctx = { state: {} };
     const originalBody = { model: "kimi-k2.7" };
